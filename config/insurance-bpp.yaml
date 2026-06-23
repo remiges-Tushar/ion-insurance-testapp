@@ -1,0 +1,138 @@
+appName: "insurance-bpp"
+log:
+  level: debug
+  destinations:
+    - type: file
+      config:
+        path: /dev/stdout
+  contextKeys:
+    - transaction_id
+    - message_id
+    - subscriber_id
+    - module_id
+http:
+  port: 8082
+  timeout:
+    read: 30
+    write: 30
+    idle: 30
+pluginManager:
+  root: ./plugins
+
+plugins:
+  otelsetup:
+    id: otelsetup
+    config:
+      serviceName: "insurance-bpp"
+      serviceVersion: "1.0.0"
+      environment: "development"
+      domain: "ion:finance"
+      enableMetrics: "false"
+      enableTracing: "false"
+      enableLogs: "true"
+      timeInterval: "5"
+      auditFieldsConfig: "/app/config/audit-fields.yaml"
+
+modules:
+  - name: bppTxnReceiver
+    path: /bpp/receiver/
+    handler:
+      type: std
+      role: bpp
+      httpClientConfig:
+        maxIdleConns: 1000
+        maxIdleConnsPerHost: 200
+        idleConnTimeout: 300s
+        responseHeaderTimeout: 5s
+      plugins:
+        registry:
+          id: dediregistry
+          config:
+            url: https://api.dedi.global/dedi
+            registryName: ion-launch-subs
+            timeout: 10
+        keyManager:
+          id: simplekeymanager
+          config:
+            networkParticipant: ion.id
+            keyId: insurance-bpp.iontest
+            signingPrivateKey: kYgQu14UB1w840W95xmIQF7j9aCuTF8tGj/7dCXrrkY=
+            signingPublicKey: SKcAR3CuwaxjVhJWPL3Xe5Pn04qZLD9692lOy3P62qM=
+            encrPrivateKey: kYgQu14UB1w840W95xmIQF7j9aCuTF8tGj/7dCXrrkY=
+            encrPublicKey: SKcAR3CuwaxjVhJWPL3Xe5Pn04qZLD9692lOy3P62qM=
+        schemaValidator:
+          id: schemav2validator
+          config:
+            type: url
+            location: https://raw.githubusercontent.com/beckn/protocol-specifications-v2/main/api/v2.0.0/beckn.yaml
+            cacheTTL: "3600"
+            extendedSchema_enabled: "false"
+            extendedSchema_cacheTTL: "86400"
+            extendedSchema_maxCacheSize: "100"
+            extendedSchema_downloadTimeout: "30"
+        cache:
+          id: cache
+          config:
+            addr: redis:6379
+        signValidator:
+          id: signvalidator
+        router:
+          id: router
+          config:
+            routingConfig: /app/config/routing-bpp-receiver.yaml
+      steps:
+        - validateSign
+        - addRoute
+        - validateSchema
+
+  - name: bppTxnCaller
+    path: /bpp/caller/
+    handler:
+      type: std
+      role: bpp
+      subscriberId: ion.id
+      httpClientConfig:
+        maxIdleConns: 1000
+        maxIdleConnsPerHost: 200
+        idleConnTimeout: 300s
+        responseHeaderTimeout: 5s
+      plugins:
+        registry:
+          id: dediregistry
+          config:
+            url: https://api.dedi.global/dedi
+            registryName: ion-launch-subs
+            timeout: 10
+        keyManager:
+          id: simplekeymanager
+          config:
+            networkParticipant: ion.id
+            keyId: insurance-bpp.iontest
+            signingPrivateKey: kYgQu14UB1w840W95xmIQF7j9aCuTF8tGj/7dCXrrkY=
+            signingPublicKey: SKcAR3CuwaxjVhJWPL3Xe5Pn04qZLD9692lOy3P62qM=
+            encrPrivateKey: kYgQu14UB1w840W95xmIQF7j9aCuTF8tGj/7dCXrrkY=
+            encrPublicKey: SKcAR3CuwaxjVhJWPL3Xe5Pn04qZLD9692lOy3P62qM=
+        schemaValidator:
+          id: schemav2validator
+          config:
+            type: url
+            location: https://raw.githubusercontent.com/beckn/protocol-specifications-v2/main/api/v2.0.0/beckn.yaml
+            cacheTTL: "3600"
+            extendedSchema_enabled: "false"
+            extendedSchema_cacheTTL: "86400"
+            extendedSchema_maxCacheSize: "100"
+            extendedSchema_downloadTimeout: "30"
+        cache:
+          id: cache
+          config:
+            addr: redis:6379
+        router:
+          id: router
+          config:
+            routingConfig: /app/config/routing-bpp-caller.yaml
+        signer:
+          id: signer
+      steps:
+        - addRoute
+        - sign
+        - validateSchema

@@ -1,0 +1,14 @@
+routingRules:
+  - version: "2.0.0"
+    targetType: "url"
+    target:
+      url: "http://onix-bpp:8082/bpp/receiver"
+    endpoints:
+      - select
+      - init
+      - confirm
+      - status
+      - cancel
+      - rate
+      - support
+      - discover

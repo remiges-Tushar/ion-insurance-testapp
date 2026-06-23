@@ -1,0 +1,194 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: insurance
+      POSTGRES_PASSWORD: insurance
+      POSTGRES_DB: postgres
+    ports:
+      - "5435:5432"
+    volumes:
+      - insurance-postgres:/var/lib/postgresql/data
+      - ./postgres/init-dbs.sh:/docker-entrypoint-initdb.d/init-dbs.sh:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U insurance"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    networks:
+      - insurance_network
+
+  redis:
+    image: redis:alpine
+    container_name: insurance-redis
+    ports:
+      - "6380:6379"
+    networks:
+      - insurance_network
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  migrate-bpp:
+    build:
+      context: ./bpp-application
+      dockerfile: Dockerfile.migrate
+    environment:
+      PGHOST: postgres
+      PGPORT: 5432
+      PGDATABASE: insurance_bpp
+      PGUSER: insurance
+      PGPASSWORD: insurance
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - insurance_network
+
+  migrate-bap:
+    build:
+      context: ./bap-application
+      dockerfile: Dockerfile.migrate
+    environment:
+      PGHOST: postgres
+      PGPORT: 5432
+      PGDATABASE: insurance_bap
+      PGUSER: insurance
+      PGPASSWORD: insurance
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - insurance_network
+
+  cs:
+    build:
+      context: ./cs-mock
+      dockerfile: Dockerfile
+    container_name: insurance-cs
+    environment:
+      CS_PORT: "9090"
+      BPP_WEBHOOK_URL: "http://bpp:8080/webhook"
+    ports:
+      - "9090:9090"
+    networks:
+      - insurance_network
+
+  onix-bpp:
+    image: fidedocker/onix-adapter
+    container_name: insurance-onix-bpp
+    platform: linux/amd64
+    ports:
+      - "8082:8082"
+    environment:
+      CONFIG_FILE: "/app/config/insurance-bpp.yaml"
+      REDIS_ADDR: redis:6379
+    volumes:
+      - ./config:/app/config:ro
+    command: ["./server", "--config=/app/config/insurance-bpp.yaml"]
+    depends_on:
+      redis:
+        condition: service_healthy
+    networks:
+      - insurance_network
+
+  onix-bap:
+    image: fidedocker/onix-adapter
+    container_name: insurance-onix-bap
+    platform: linux/amd64
+    ports:
+      - "8081:8081"
+    environment:
+      CONFIG_FILE: "/app/config/insurance-bap.yaml"
+      REDIS_ADDR: redis:6379
+    volumes:
+      - ./config:/app/config:ro
+    command: ["./server", "--config=/app/config/insurance-bap.yaml"]
+    depends_on:
+      redis:
+        condition: service_healthy
+    networks:
+      - insurance_network
+
+  bpp:
+    build:
+      context: ./bpp-application
+      dockerfile: Dockerfile
+    container_name: insurance-bpp
+    ports:
+      - "8080:8080"
+    environment:
+      BPP_DB_HOST: postgres
+      BPP_DB_PORT: "5432"
+      BPP_DB_USER: insurance
+      BPP_DB_PASSWORD: insurance
+      BPP_DB_NAME: insurance_bpp
+      BPP_DB_SSLMODE: disable
+      BPP_SERVER_PORT: "8080"
+      BPP_JWT_SECRET: insurance-bpp-jwt-secret-change-in-production
+      BPP_ONIX_BPP_CALLER_URL: http://onix-bpp:8082/bpp/caller
+    depends_on:
+      migrate-bpp:
+        condition: service_completed_successfully
+      cs:
+        condition: service_started
+    networks:
+      - insurance_network
+
+  bap:
+    build:
+      context: ./bap-application
+      dockerfile: Dockerfile
+    container_name: insurance-bap
+    ports:
+      - "8083:8083"
+    environment:
+      BAP_DB_HOST: postgres
+      BAP_DB_PORT: "5432"
+      BAP_DB_USER: insurance
+      BAP_DB_PASSWORD: insurance
+      BAP_DB_NAME: insurance_bap
+      BAP_DB_SSLMODE: disable
+      BAP_SERVER_PORT: "8083"
+      BAP_REDIS_ADDR: redis:6379
+      BAP_ONIX_BAP_CALLER_URL: http://onix-bap:8081/bap/caller
+    depends_on:
+      migrate-bap:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+    networks:
+      - insurance_network
+
+  bpp-frontend:
+    build:
+      context: ./bpp-frontend
+      dockerfile: Dockerfile
+    container_name: insurance-bpp-frontend
+    ports:
+      - "3001:80"
+    depends_on:
+      - bpp
+    networks:
+      - insurance_network
+
+  bap-frontend:
+    build:
+      context: ./bap-frontend
+      dockerfile: Dockerfile
+    container_name: insurance-bap-frontend
+    ports:
+      - "3000:80"
+    depends_on:
+      - bap
+    networks:
+      - insurance_network
+
+networks:
+  insurance_network:
+    driver: bridge
+
+volumes:
+  insurance-postgres:

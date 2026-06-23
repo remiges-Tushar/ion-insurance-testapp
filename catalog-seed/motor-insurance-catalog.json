@@ -1,0 +1,116 @@
+{
+  "catalog": {
+    "name": "PT Asuransi Maju Motor Insurance Catalog",
+    "version": "1.0.0",
+    "descriptor": {
+      "name": "PT Asuransi Maju Motor Insurance",
+      "shortDesc": "OJK-licensed motor insurance products for Indonesia",
+      "longDesc": "PT Asuransi Maju offers comprehensive and third-party motor insurance products compliant with OJK Surat Edaran No. SE-06/D.05/2013"
+    }
+  },
+  "resources": [
+    {
+      "productType": "MOTOR_COMPREHENSIVE",
+      "vehicleType": "FOUR_WHEELER",
+      "ojkProductCode": "AMAJU-KOMPREHENSIF-4W-001",
+      "resourceAttributes": {
+        "@context": "https://raw.githubusercontent.com/indonesiaopennetwork/ion-specs/refs/heads/pre-main/schema/extensions/finance/resource/v1/context.jsonld",
+        "@type": "ion:InsuranceProduct",
+        "productType": "MOTOR_COMPREHENSIVE",
+        "vehicleType": "FOUR_WHEELER",
+        "ojkProductCode": "AMAJU-KOMPREHENSIF-4W-001",
+        "ojkLicense": "OJK-KEP-234/KM.10/2020",
+        "coverageInclusions": [
+          "PARTIAL_LOSS",
+          "TOTAL_LOSS",
+          "THEFT",
+          "FIRE",
+          "THIRD_PARTY_LIABILITY",
+          "NATURAL_DISASTER",
+          "ROADSIDE_ASSISTANCE",
+          "PERSONAL_ACCIDENT_DRIVER",
+          "PERSONAL_ACCIDENT_PASSENGER"
+        ],
+        "standardExclusions": [
+          "OVERLOADING",
+          "MECHANICAL_BREAKDOWN",
+          "DUI",
+          "INTENTIONAL_DAMAGE",
+          "RACING",
+          "WAR_TERRORISM"
+        ]
+      }
+    },
+    {
+      "productType": "MOTOR_THIRD_PARTY",
+      "vehicleType": "FOUR_WHEELER",
+      "ojkProductCode": "AMAJU-TLO-4W-001",
+      "resourceAttributes": {
+        "@context": "https://raw.githubusercontent.com/indonesiaopennetwork/ion-specs/refs/heads/pre-main/schema/extensions/finance/resource/v1/context.jsonld",
+        "@type": "ion:InsuranceProduct",
+        "productType": "MOTOR_THIRD_PARTY",
+        "vehicleType": "FOUR_WHEELER",
+        "ojkProductCode": "AMAJU-TLO-4W-001",
+        "ojkLicense": "OJK-KEP-234/KM.10/2020",
+        "coverageInclusions": [
+          "TOTAL_LOSS",
+          "THEFT",
+          "FIRE",
+          "THIRD_PARTY_LIABILITY"
+        ],
+        "standardExclusions": [
+          "OVERLOADING",
+          "MECHANICAL_BREAKDOWN",
+          "DUI",
+          "INTENTIONAL_DAMAGE",
+          "TIRE_ONLY",
+          "RACING",
+          "WAR_TERRORISM",
+          "NUCLEAR"
+        ]
+      }
+    }
+  ],
+  "offers": [
+    {
+      "resourceIndex": 0,
+      "tariffZone": "ZONE_3",
+      "premiumRateMin": 2.53,
+      "premiumRateMax": 3.08,
+      "deductibleIDR": 300000,
+      "inspectionRequired": false,
+      "quoteValidDays": 7,
+      "offerAttributes": {
+        "@context": "https://raw.githubusercontent.com/indonesiaopennetwork/ion-specs/refs/heads/pre-main/schema/extensions/finance/offer/v1/context.jsonld",
+        "@type": "ion:PolicyQuote",
+        "tariffZone": "ZONE_3",
+        "deductibleIDR": 300000,
+        "inspectionRequired": false,
+        "quoteValidDays": 7,
+        "cancellationPolicy": "https://insurance.maju.id/policies/cancellation",
+        "claimPolicy": "https://insurance.maju.id/policies/claim",
+        "renewalPolicy": "https://insurance.maju.id/policies/renewal"
+      }
+    },
+    {
+      "resourceIndex": 1,
+      "tariffZone": "ZONE_3",
+      "premiumRateMin": 0.47,
+      "premiumRateMax": 0.56,
+      "deductibleIDR": 200000,
+      "inspectionRequired": false,
+      "quoteValidDays": 7,
+      "offerAttributes": {
+        "@context": "https://raw.githubusercontent.com/indonesiaopennetwork/ion-specs/refs/heads/pre-main/schema/extensions/finance/offer/v1/context.jsonld",
+        "@type": "ion:PolicyQuote",
+        "tariffZone": "ZONE_3",
+        "deductibleIDR": 200000,
+        "inspectionRequired": false,
+        "quoteValidDays": 7,
+        "cancellationPolicy": "https://insurance.maju.id/policies/cancellation",
+        "claimPolicy": "https://insurance.maju.id/policies/claim",
+        "renewalPolicy": "https://insurance.maju.id/policies/renewal"
+      }
+    }
+  ]
+}
