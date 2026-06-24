@@ -15,6 +15,8 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
+const ionSchemaBaseBAP = "https://raw.githubusercontent.com/remiges-Tushar/ion-specs/refs/heads/feat/FIN-03-motor-insurance-schema/schema/extensions/finance/"
+
 // ClientService is the core business-logic layer for the BAP application.
 // It mediates between the frontend-facing HTTP handlers and the Beckn network
 // via onix-bap, using Redis pub/sub to turn async Beckn callbacks into
@@ -200,11 +202,11 @@ func (s *ClientService) Select(ctx context.Context, req map[string]any) (map[str
 				"commitments": []any{
 					map[string]any{
 						"status":    map[string]any{"descriptor": map[string]any{"code": "DRAFT"}},
-						"resources": []any{map[string]any{"@context": "https://schema.beckn.one/ion/finance/v1", "@type": "beckn:Resource", "id": productId, "descriptor": map[string]any{"name": "InsuranceProduct"}, "quantity": map[string]any{"unitQuantity": 1, "unitCode": "policy", "unitText": "policy"}}},
+						"resources": []any{map[string]any{"id": productId, "descriptor": map[string]any{"name": "InsuranceProduct"}, "quantity": map[string]any{"unitQuantity": 1, "unitCode": "policy", "unitText": "policy"}}},
 						"offer":     map[string]any{"id": "1", "resourceIds": []any{productId}},
 						"commitmentAttributes": map[string]any{
-							"@context":    "https://schema.beckn.one/ion/finance/v1",
-							"@type":       "ion:InsuranceCommitment",
+							"@context":    ionSchemaBaseBAP + "insurance-contract/v1/context.jsonld",
+							"@type":       "InsurancePolicy",
 							"productType": productType,
 							"tariffZone":  tariffZone,
 							"idv":         idv,
@@ -245,8 +247,8 @@ func (s *ClientService) Init(ctx context.Context, req map[string]any) (map[strin
 					map[string]any{
 						"id": nik,
 						"participantAttributes": map[string]any{
-							"@context": "https://schema.beckn.one/ion/finance/v1",
-							"@type":    "ion:Policyholder",
+							"@context": ionSchemaBaseBAP + "insurance-participant/v1/context.jsonld",
+							"@type":    "Policyholder",
 							"nik":      nik,
 						},
 					},
@@ -254,11 +256,11 @@ func (s *ClientService) Init(ctx context.Context, req map[string]any) (map[strin
 				"commitments": []any{
 					map[string]any{
 						"status":    map[string]any{"descriptor": map[string]any{"code": "DRAFT"}},
-						"resources": []any{map[string]any{"@context": "https://schema.beckn.one/ion/finance/v1", "@type": "beckn:Resource", "id": "1", "descriptor": map[string]any{"name": "InsuranceProduct"}, "quantity": map[string]any{"unitQuantity": 1, "unitCode": "policy", "unitText": "policy"}}},
+						"resources": []any{map[string]any{"id": "1", "descriptor": map[string]any{"name": "InsuranceProduct"}, "quantity": map[string]any{"unitQuantity": 1, "unitCode": "policy", "unitText": "policy"}}},
 						"offer":     map[string]any{"id": "1", "resourceIds": []any{"1"}},
 						"commitmentAttributes": map[string]any{
-							"@context": "https://schema.beckn.one/ion/finance/v1",
-							"@type":    "ion:InsuranceCommitment",
+							"@context": ionSchemaBaseBAP + "insurance-contract/v1/context.jsonld",
+							"@type":    "InsurancePolicy",
 							"vin":      vin,
 							"idv":      idv,
 						},
@@ -297,11 +299,11 @@ func (s *ClientService) Confirm(ctx context.Context, req map[string]any) (map[st
 				"commitments": []any{
 					map[string]any{
 						"status":    map[string]any{"descriptor": map[string]any{"code": "ACTIVE"}},
-						"resources": []any{map[string]any{"@context": "https://schema.beckn.one/ion/finance/v1", "@type": "beckn:Resource", "id": "1", "descriptor": map[string]any{"name": "InsuranceProduct"}, "quantity": map[string]any{"unitQuantity": 1, "unitCode": "policy", "unitText": "policy"}}},
+						"resources": []any{map[string]any{"id": "1", "descriptor": map[string]any{"name": "InsuranceProduct"}, "quantity": map[string]any{"unitQuantity": 1, "unitCode": "policy", "unitText": "policy"}}},
 						"offer":     map[string]any{"id": "1", "resourceIds": []any{"1"}},
 						"commitmentAttributes": map[string]any{
-							"@context": "https://schema.beckn.one/ion/finance/v1",
-							"@type":    "ion:InsuranceCommitment",
+							"@context": ionSchemaBaseBAP + "insurance-contract/v1/context.jsonld",
+							"@type":    "InsurancePolicy",
 							"payment": map[string]any{
 								"method": paymentMethod,
 								"ref":    paymentRef,
@@ -334,7 +336,7 @@ func (s *ClientService) RequestStatus(ctx context.Context, txnId string) (map[st
 				"commitments": []any{
 					map[string]any{
 						"status":    map[string]any{"descriptor": map[string]any{"code": "ACTIVE"}},
-						"resources": []any{map[string]any{"@context": "https://schema.beckn.one/ion/finance/v1", "@type": "beckn:Resource", "id": "1", "descriptor": map[string]any{"name": "InsuranceProduct"}, "quantity": map[string]any{"unitQuantity": 1, "unitCode": "policy", "unitText": "policy"}}},
+						"resources": []any{map[string]any{"id": "1", "descriptor": map[string]any{"name": "InsuranceProduct"}, "quantity": map[string]any{"unitQuantity": 1, "unitCode": "policy", "unitText": "policy"}}},
 						"offer":     map[string]any{"id": "1", "resourceIds": []any{"1"}},
 					},
 				},
@@ -361,7 +363,7 @@ func (s *ClientService) Cancel(ctx context.Context, txnId string) (map[string]an
 				"commitments": []any{
 					map[string]any{
 						"status":    map[string]any{"descriptor": map[string]any{"code": "CLOSED"}},
-						"resources": []any{map[string]any{"@context": "https://schema.beckn.one/ion/finance/v1", "@type": "beckn:Resource", "id": "1", "descriptor": map[string]any{"name": "InsuranceProduct"}, "quantity": map[string]any{"unitQuantity": 1, "unitCode": "policy", "unitText": "policy"}}},
+						"resources": []any{map[string]any{"id": "1", "descriptor": map[string]any{"name": "InsuranceProduct"}, "quantity": map[string]any{"unitQuantity": 1, "unitCode": "policy", "unitText": "policy"}}},
 						"offer":     map[string]any{"id": "1", "resourceIds": []any{"1"}},
 					},
 				},
@@ -428,10 +430,7 @@ func (s *ClientService) Support(ctx context.Context, req map[string]any) (map[st
 					"name": description,
 				},
 				"channels": []any{
-					map[string]any{
-						"@context": "https://schema.beckn.io/",
-						"@type":    "beckn:SupportChannel",
-					},
+					map[string]any{"type": "EMAIL"},
 				},
 			},
 		},

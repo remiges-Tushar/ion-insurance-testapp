@@ -31,6 +31,9 @@ func RegisterRoutes(r *gin.Engine, h *Handlers, authSvc *service.AuthService) {
 		wh.POST("/rate", h.WebhookRate)
 		wh.POST("/support", h.WebhookSupport)
 		wh.POST("/catalog/on_publish", h.WebhookOnPublish)
+		wh.POST("/xendit", h.HandleXenditWebhook)
+		wh.POST("/xendit-qris", h.HandleXenditQRISWebhook)
+		wh.POST("/simulate-payment", h.SimulatePayment) // sandbox testing only
 	}
 
 	// Protected API routes

@@ -394,6 +394,75 @@ func (h *Handlers) WebhookOnPublish(c *gin.Context) {
 	c.JSON(http.StatusOK, ackACK())
 }
 
+// Webhook: Xendit payment notification
+func (h *Handlers) HandleXenditWebhook(c *gin.Context) {
+	token := c.GetHeader("x-callback-token")
+	if !h.beckn.VerifyXenditToken(token) {
+		c.JSON(http.StatusForbidden, gin.H{"error": "invalid callback token"})
+		return
+	}
+	var body map[string]any
+	if err := c.ShouldBindJSON(&body); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	externalID, _ := body["external_id"].(string)
+	amount, _ := body["amount"].(float64)
+	bankCode, _ := body["bank_code"].(string)
+
+	if err := h.beckn.ProcessXenditPayment(c.Request.Context(), externalID, amount, bankCode); err != nil {
+		// Return 200 so Xendit does not retry; error is already logged by the service.
+		c.JSON(http.StatusOK, gin.H{"status": "received", "error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"status": "ok"})
+}
+
+// Webhook: Xendit QRIS payment notification
+func (h *Handlers) HandleXenditQRISWebhook(c *gin.Context) {
+	token := c.GetHeader("x-callback-token")
+	if !h.beckn.VerifyXenditToken(token) {
+		c.JSON(http.StatusForbidden, gin.H{"error": "invalid callback token"})
+		return
+	}
+	var body map[string]any
+	if err := c.ShouldBindJSON(&body); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	// QRIS webhook: { "event": "qr.payment", "data": { "reference_id": "...", "amount": ..., "status": "SUCCEEDED" } }
+	data, _ := body["data"].(map[string]any)
+	referenceID, _ := data["reference_id"].(string)
+	amount, _ := data["amount"].(float64)
+	status, _ := data["status"].(string)
+
+	if status != "SUCCEEDED" {
+		c.JSON(http.StatusOK, gin.H{"status": "ignored", "payment_status": status})
+		return
+	}
+
+	if err := h.beckn.ProcessXenditQRISPayment(c.Request.Context(), referenceID, amount); err != nil {
+		c.JSON(http.StatusOK, gin.H{"status": "received", "error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"status": "ok"})
+}
+
+// SimulatePayment — sandbox only, triggers Xendit test payment
+func (h *Handlers) SimulatePayment(c *gin.Context) {
+	txnID := c.Query("txn_id")
+	method := c.DefaultQuery("method", "VA") // VA or QRIS
+	if txnID == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "txn_id required"})
+		return
+	}
+	if err := h.beckn.SimulatePayment(c.Request.Context(), txnID, method); err != nil {
+		c.JSON(http.StatusBadGateway, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"status": "simulated", "method": method})
+}
+
 func ackACK() map[string]any {
 	return map[string]any{"message": map[string]any{"ack": map[string]any{"status": "ACK"}}}
 }

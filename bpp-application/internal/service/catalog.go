@@ -13,6 +13,8 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
+const ionSchemaBaseCatalog = "https://raw.githubusercontent.com/remiges-Tushar/ion-specs/refs/heads/feat/FIN-03-motor-insurance-schema/schema/extensions/finance/"
+
 type CatalogService struct {
 	db            *pgxpool.Pool
 	onixBPPCaller string
@@ -269,12 +271,8 @@ func (s *CatalogService) PublishCatalog(ctx context.Context, catalogID int64, bp
 			if pAttrs == nil {
 				pAttrs = map[string]any{}
 			}
-			if _, ok := pAttrs["@context"]; !ok {
-				pAttrs["@context"] = "https://schema.ion.id/core/identity/v1/context.jsonld"
-			}
-			if _, ok := pAttrs["@type"]; !ok {
-				pAttrs["@type"] = "ion:BusinessIdentity"
-			}
+			pAttrs["@context"] = ionSchemaBaseCatalog + "insurance-participant/v1/context.jsonld"
+			pAttrs["@type"] = "Insurer"
 			cleanLoc := sanitizeLocations(pLoc)
 			pb := map[string]any{
 				"id":                 fmt.Sprintf("PROV-%d", *providerID),
@@ -343,11 +341,16 @@ func (s *CatalogService) PublishCatalog(ctx context.Context, catalogID int64, bp
 				}
 				var oAttrs map[string]any
 				json.Unmarshal(oAttrsJSON, &oAttrs)
+				if oAttrs == nil {
+					oAttrs = map[string]any{}
+				}
+				oAttrs["@context"] = ionSchemaBaseCatalog + "insurance-offer/v1/context.jsonld"
+				oAttrs["@type"] = "PolicyQuote"
 				linkedOffers = append(linkedOffers, map[string]any{
-					"id":             fmt.Sprintf("OFFER-%d", oid),
-					"tariffZone":     zone,
-					"premiumRateMin": rateMin,
-					"premiumRateMax": rateMax,
+					"id":              fmt.Sprintf("OFFER-%d", oid),
+					"tariffZone":      zone,
+					"premiumRateMin":  rateMin,
+					"premiumRateMax":  rateMax,
 					"offerAttributes": oAttrs,
 				})
 			}
@@ -360,6 +363,8 @@ func (s *CatalogService) PublishCatalog(ctx context.Context, catalogID int64, bp
 		if attrs == nil {
 			attrs = map[string]any{}
 		}
+		attrs["@context"] = ionSchemaBaseCatalog + "insurance-resource/v1/context.jsonld"
+		attrs["@type"] = "InsuranceProduct"
 		if _, exists := attrs["productType"]; !exists {
 			attrs["productType"] = productType
 		}

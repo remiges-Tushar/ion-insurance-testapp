@@ -1,4 +1,5 @@
-import React, { useState, useRef } from 'react'
+import React, { useState, useRef, useEffect } from 'react'
+import QRCode from 'qrcode'
 import { useLocation, useNavigate } from 'react-router-dom'
 import { useTranslation } from 'react-i18next'
 import { motion, AnimatePresence } from 'framer-motion'
@@ -323,17 +324,47 @@ function KYCStep({ onNext, onBack, txnId, vehicleForm }) {
   )
 }
 
+function QRCanvas({ qrString }) {
+  const canvasRef = useRef(null)
+  useEffect(() => {
+    if (canvasRef.current && qrString) {
+      QRCode.toCanvas(canvasRef.current, qrString, { width: 220, margin: 2 })
+    }
+  }, [qrString])
+  if (!qrString) return <p className="text-slate-400 text-sm text-center py-8">QR code not available</p>
+  return <canvas ref={canvasRef} className="mx-auto rounded-lg" />
+}
+
 // Step 4: Payment
 function PaymentStep({ initData, onNext, onBack, txnId, annualPremium }) {
   const { t } = useTranslation()
   const [loading, setLoading] = useState(false)
+  const [simulating, setSimulating] = useState(false)
+  const [simDone, setSimDone] = useState(false)
   const [error, setError] = useState('')
+  const [tab, setTab] = useState('VA')
   const submitting = useRef(false)
 
-  // Beckn v2 on_init: message.contract.commitments[0].commitmentAttributes
-  const attrs = initData?.message?.contract?.commitments?.[0]?.commitmentAttributes || {}
-  const totalPremium = annualPremium || 0
-  const virtualAccount = attrs.virtualAccount || '—'
+  // VA details are in considerationAttributes; commitmentAttributes is the fallback
+  const considerationAttrs = initData?.message?.contract?.commitments?.[0]?.considerationAttributes || {}
+  const commitmentAttrs = initData?.message?.contract?.commitments?.[0]?.commitmentAttributes || {}
+  const totalPremium = considerationAttrs.totalAmountIDR || annualPremium || 0
+  const virtualAccount = considerationAttrs.virtualAccount || commitmentAttrs.virtualAccount || '—'
+  const bankCode = considerationAttrs.bankCode || commitmentAttrs.bankCode || ''
+  const qrisString = considerationAttrs.qrisString || ''
+
+  async function handleSimulate() {
+    setSimulating(true)
+    setError('')
+    try {
+      await api.post(`/webhook/simulate-payment?txn_id=${txnId}&method=${tab}`)
+      setSimDone(true)
+    } catch (err) {
+      setError(err?.message || 'Simulation failed.')
+    } finally {
+      setSimulating(false)
+    }
+  }
 
   async function handlePaid() {
     if (submitting.current) return
@@ -341,10 +372,11 @@ function PaymentStep({ initData, onNext, onBack, txnId, annualPremium }) {
     setLoading(true)
     setError('')
     try {
+      const isQRIS = tab === 'QRIS'
       const res = await api.post('/api/v1/confirm', {
         transaction_id: txnId,
-        paymentMethod: 'VIRTUAL_ACCOUNT',
-        paymentRef: `VA-${virtualAccount}`,
+        paymentMethod: isQRIS ? 'QRIS' : 'VIRTUAL_ACCOUNT',
+        paymentRef: isQRIS ? `QRIS-${txnId}` : `VA-${virtualAccount}`,
         amount: totalPremium,
       })
       onNext(res)
@@ -366,12 +398,57 @@ function PaymentStep({ initData, onNext, onBack, txnId, annualPremium }) {
           <p className="text-sm text-slate-500 mb-1">{t('payment.total')}</p>
           <p className="text-3xl font-bold text-slate-900">IDR {Number(totalPremium).toLocaleString()}</p>
         </div>
-        <div className="border-t border-gray-100 pt-4">
-          <p className="text-sm text-slate-500 mb-2">{t('payment.virtual_account')}</p>
-          <div className="bg-gray-50 rounded-lg px-4 py-3 font-mono text-lg font-bold tracking-wider text-slate-900 text-center">
-            {virtualAccount}
+        {/* Payment method tabs */}
+        <div className="flex rounded-lg border border-gray-200 overflow-hidden">
+          <button
+            onClick={() => { setTab('VA'); setSimDone(false) }}
+            className={`flex-1 py-2 text-sm font-medium transition-colors ${tab === 'VA' ? 'bg-blue-600 text-white' : 'bg-white text-slate-600 hover:bg-gray-50'}`}
+          >
+            Virtual Account
+          </button>
+          <button
+            onClick={() => { setTab('QRIS'); setSimDone(false) }}
+            className={`flex-1 py-2 text-sm font-medium transition-colors ${tab === 'QRIS' ? 'bg-blue-600 text-white' : 'bg-white text-slate-600 hover:bg-gray-50'}`}
+          >
+            QRIS
+          </button>
+        </div>
+
+        {tab === 'VA' && (
+          <div className="border-t border-gray-100 pt-4">
+            <p className="text-sm text-slate-500 mb-2">{t('payment.virtual_account')}</p>
+            {bankCode && (
+              <p className="text-sm font-semibold text-slate-700 mb-1 text-center">Bank {bankCode}</p>
+            )}
+            <div className="bg-gray-50 rounded-lg px-4 py-3 font-mono text-lg font-bold tracking-wider text-slate-900 text-center">
+              {virtualAccount}
+            </div>
+            <p className="text-xs text-slate-400 mt-2 text-center">Transfer the exact amount to this virtual account</p>
           </div>
-          <p className="text-xs text-slate-400 mt-2 text-center">Transfer the exact amount to this virtual account</p>
+        )}
+
+        {tab === 'QRIS' && (
+          <div className="border-t border-gray-100 pt-4 flex flex-col items-center gap-3">
+            <p className="text-sm text-slate-500">Scan with your mobile banking or e-wallet app</p>
+            <QRCanvas qrString={qrisString} />
+            <p className="text-xs text-slate-400 text-center">QRIS — IDR {Number(totalPremium).toLocaleString()}</p>
+          </div>
+        )}
+
+        {/* Sandbox test helper */}
+        <div className="border-t border-dashed border-amber-200 pt-4">
+          <p className="text-xs text-amber-600 font-medium mb-2 text-center">⚡ Sandbox Testing</p>
+          {simDone ? (
+            <p className="text-xs text-green-600 text-center font-medium">Payment simulated! Now click "I Have Completed Payment" below.</p>
+          ) : (
+            <button
+              onClick={handleSimulate}
+              disabled={simulating}
+              className="w-full py-2 text-sm border border-amber-400 text-amber-700 rounded-lg hover:bg-amber-50 transition-colors disabled:opacity-50"
+            >
+              {simulating ? 'Simulating...' : `Simulate ${tab === 'QRIS' ? 'QRIS' : 'VA'} Payment (Test)`}
+            </button>
+          )}
         </div>
       </div>
       <div className="flex gap-3">
