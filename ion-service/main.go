@@ -2,18 +2,25 @@ package main
 
 import (
 	"bytes"
+	"crypto"
 	"crypto/hmac"
 	"crypto/rand"
+	"crypto/rsa"
 	"crypto/sha256"
+	"crypto/sha512"
 	"crypto/subtle"
+	"crypto/x509"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
+	"encoding/pem"
 	"fmt"
 	"io"
 	"log"
 	"net/http"
 	"os"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -23,12 +30,23 @@ import (
 //   - Receive DOKU payment webhooks and forward payment notifications to BPP
 //   - Execute DOKU settlement releases with split disbursements (called by BPP)
 
+type cachedToken struct {
+	token     string
+	expiresAt time.Time
+}
+
 type ionService struct {
 	clientID      string
 	secretKey     string
 	baseURL       string
 	callbackURL   string
 	bppPaymentURL string
+
+	// SNAP API fields (for QRIS)
+	snapClientID string
+	snapPrivKey  *rsa.PrivateKey
+	snapToken    *cachedToken
+	snapMu       sync.Mutex
 }
 
 func main() {
@@ -43,6 +61,22 @@ func main() {
 		baseURL:       getenv("DOKU_BASE_URL", "https://api-sandbox.doku.com"),
 		callbackURL:   os.Getenv("DOKU_CALLBACK_URL"),
 		bppPaymentURL: getenv("BPP_PAYMENT_URL", "http://bpp:8080/webhook/payment-received"),
+	}
+
+	// SNAP client ID defaults to non-SNAP client ID if not separately configured
+	svc.snapClientID = getenv("DOKU_SNAP_CLIENT_ID", svc.clientID)
+
+	// Load RSA private key for SNAP B2B token (base64-encoded PEM or raw PEM)
+	if keyStr := os.Getenv("DOKU_SNAP_PRIVATE_KEY"); keyStr != "" {
+		privKey, err := loadRSAPrivateKey(keyStr)
+		if err != nil {
+			log.Printf("[ION] WARN: DOKU_SNAP_PRIVATE_KEY invalid: %v — SNAP QRIS disabled", err)
+		} else {
+			svc.snapPrivKey = privKey
+			log.Printf("[ION] SNAP QRIS enabled (RSA key loaded)")
+		}
+	} else {
+		log.Printf("[ION] SNAP QRIS disabled (DOKU_SNAP_PRIVATE_KEY not set)")
 	}
 
 	mux := http.NewServeMux()
@@ -107,7 +141,8 @@ func (s *ionService) handleCreateVA(w http.ResponseWriter, r *http.Request) {
 	jsonOK(w, va)
 }
 
-// handleCreateQRIS creates a DOKU QRIS payment code with hold_settlement=true.
+// handleCreateQRIS creates a DOKU QRIS payment code via the SNAP API.
+// Falls back to non-SNAP if SNAP is not configured.
 // Called by BAP alongside VA creation.
 //
 // Request:  { "invoice_number": "ins-...", "customer_name": "...", "amount_idr": 6050499 }
@@ -137,7 +172,14 @@ func (s *ionService) handleCreateQRIS(w http.ResponseWriter, r *http.Request) {
 
 	// Use invoice number with -qris suffix to avoid duplicate invoice collision with VA
 	qrisInvoice := req.InvoiceNumber + "-qris"
-	qr, err := s.createQRIS(qrisInvoice, req.CustomerName, req.AmountIDR)
+
+	var qr string
+	var err error
+	if s.snapPrivKey != nil {
+		qr, err = s.createQRISSnap(qrisInvoice, req.AmountIDR)
+	} else {
+		qr, err = s.createQRISLegacy(qrisInvoice, req.CustomerName, req.AmountIDR)
+	}
 	if err != nil {
 		log.Printf("[ION] createQRIS error: %v", err)
 		jsonError(w, "doku QRIS creation failed: "+err.Error(), http.StatusBadGateway)
@@ -287,7 +329,7 @@ func (s *ionService) handleRelease(w http.ResponseWriter, r *http.Request) {
 }
 
 // ---------------------------------------------------------------------------
-// DOKU API helpers
+// DOKU non-SNAP API helpers (VA + webhook signature)
 // ---------------------------------------------------------------------------
 
 func (s *ionService) newRequestID() string {
@@ -435,7 +477,8 @@ func (s *ionService) createVA(invoiceNumber, customerName string, amount int64) 
 	}, nil
 }
 
-func (s *ionService) createQRIS(invoiceNumber, customerName string, amount int64) (string, error) {
+// createQRISLegacy uses the non-SNAP QRIS endpoint (may be disabled for merchant).
+func (s *ionService) createQRISLegacy(invoiceNumber, customerName string, amount int64) (string, error) {
 	payload := map[string]any{
 		"client": map[string]any{"id": s.clientID},
 		"order": map[string]any{
@@ -475,6 +518,218 @@ func (s *ionService) createQRIS(invoiceNumber, customerName string, amount int64
 	return resp.QR.Content, nil
 }
 
+// ---------------------------------------------------------------------------
+// DOKU SNAP API — B2B token + QRIS
+// ---------------------------------------------------------------------------
+
+// getB2BToken fetches a SNAP B2B access token (cached for 850s out of 900s TTL).
+// Uses SHA256withRSA signature as required by the SNAP B2B token endpoint.
+func (s *ionService) getB2BToken() (string, error) {
+	s.snapMu.Lock()
+	defer s.snapMu.Unlock()
+
+	if s.snapToken != nil && time.Now().Before(s.snapToken.expiresAt) {
+		return s.snapToken.token, nil
+	}
+
+	timestamp := time.Now().UTC().Format(time.RFC3339)
+	stringToSign := s.snapClientID + "|" + timestamp
+
+	sigBytes, err := signRSASHA256(s.snapPrivKey, stringToSign)
+	if err != nil {
+		return "", fmt.Errorf("RSA sign: %w", err)
+	}
+	sig := base64.StdEncoding.EncodeToString(sigBytes)
+
+	reqBody := `{"grantType":"client_credentials"}`
+	httpReq, err := http.NewRequest("POST", s.baseURL+"/authorization/v1/access-token/b2b", strings.NewReader(reqBody))
+	if err != nil {
+		return "", err
+	}
+	httpReq.Header.Set("Content-Type", "application/json")
+	httpReq.Header.Set("X-CLIENT-KEY", s.snapClientID)
+	httpReq.Header.Set("X-TIMESTAMP", timestamp)
+	httpReq.Header.Set("X-SIGNATURE", sig)
+
+	httpClient := &http.Client{Timeout: 15 * time.Second}
+	resp, err := httpClient.Do(httpReq)
+	if err != nil {
+		return "", fmt.Errorf("B2B token request: %w", err)
+	}
+	defer resp.Body.Close()
+	respBytes, _ := io.ReadAll(resp.Body)
+
+	log.Printf("[ION] SNAP B2B token → HTTP %d", resp.StatusCode)
+	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusCreated {
+		return "", fmt.Errorf("B2B token HTTP %d: %s", resp.StatusCode, string(respBytes))
+	}
+
+	var tokenResp struct {
+		AccessToken string `json:"accessToken"`
+		ExpiresIn   int    `json:"expiresIn"`
+	}
+	if err := json.Unmarshal(respBytes, &tokenResp); err != nil {
+		return "", fmt.Errorf("B2B token decode: %w", err)
+	}
+	if tokenResp.AccessToken == "" {
+		return "", fmt.Errorf("B2B token empty: %s", string(respBytes))
+	}
+
+	ttl := time.Duration(tokenResp.ExpiresIn) * time.Second
+	if ttl <= 0 {
+		ttl = 900 * time.Second
+	}
+	s.snapToken = &cachedToken{
+		token:     tokenResp.AccessToken,
+		expiresAt: time.Now().Add(ttl - 50*time.Second), // 50s safety margin
+	}
+	log.Printf("[ION] SNAP B2B token acquired, expires in %ds", tokenResp.ExpiresIn)
+	return s.snapToken.token, nil
+}
+
+// signSNAP produces the HMAC-SHA512 signature for SNAP API requests (after B2B token).
+// Formula: HTTPMethod:EndpointPath:AccessToken:lowercase(hex(sha256(body))):Timestamp
+func (s *ionService) signSNAP(method, endpointPath, accessToken string, bodyBytes []byte, timestamp string) string {
+	h := sha256.Sum256(bodyBytes)
+	bodyHash := strings.ToLower(hex.EncodeToString(h[:]))
+	stringToSign := method + ":" + endpointPath + ":" + accessToken + ":" + bodyHash + ":" + timestamp
+
+	mac := hmac.New(sha512.New, []byte(s.secretKey))
+	mac.Write([]byte(stringToSign))
+	return base64.StdEncoding.EncodeToString(mac.Sum(nil))
+}
+
+// createQRISSnap creates a DOKU QRIS using the SNAP API.
+// Returns the qrContent string ready to encode as a QR image.
+func (s *ionService) createQRISSnap(partnerReferenceNo string, amount int64) (string, error) {
+	token, err := s.getB2BToken()
+	if err != nil {
+		return "", fmt.Errorf("B2B token: %w", err)
+	}
+
+	endpoint := "/snap-adapter/b2b/v1.0/qr/qr-mpm-generate"
+	timestamp := time.Now().UTC().Format(time.RFC3339)
+
+	payload := map[string]any{
+		"partnerReferenceNo": partnerReferenceNo,
+		"amount": map[string]string{
+			"value":    fmt.Sprintf("%.2f", float64(amount)),
+			"currency": "IDR",
+		},
+		"merchantId": s.snapClientID,
+		"terminalId": "ION-001",
+		"additionalInfo": map[string]any{
+			"postalCode": "12190",
+			"feeType":    "OUR",
+		},
+	}
+	bodyBytes, err := json.Marshal(payload)
+	if err != nil {
+		return "", err
+	}
+
+	sig := s.signSNAP("POST", endpoint, token, bodyBytes, timestamp)
+	externalID := s.newRequestID()
+
+	httpReq, err := http.NewRequest("POST", s.baseURL+endpoint, bytes.NewBuffer(bodyBytes))
+	if err != nil {
+		return "", err
+	}
+	httpReq.Header.Set("Content-Type", "application/json")
+	httpReq.Header.Set("Authorization", "Bearer "+token)
+	httpReq.Header.Set("X-PARTNER-ID", s.snapClientID)
+	httpReq.Header.Set("X-EXTERNAL-ID", externalID)
+	httpReq.Header.Set("X-TIMESTAMP", timestamp)
+	httpReq.Header.Set("X-SIGNATURE", sig)
+	httpReq.Header.Set("CHANNEL-ID", "H2H")
+
+	httpClient := &http.Client{Timeout: 30 * time.Second}
+	resp, err := httpClient.Do(httpReq)
+	if err != nil {
+		return "", fmt.Errorf("SNAP QRIS request: %w", err)
+	}
+	defer resp.Body.Close()
+	respBytes, _ := io.ReadAll(resp.Body)
+
+	log.Printf("[ION] SNAP QRIS → HTTP %d", resp.StatusCode)
+	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusCreated {
+		return "", fmt.Errorf("SNAP QRIS HTTP %d: %s", resp.StatusCode, string(respBytes))
+	}
+
+	var qrisResp struct {
+		QrContent          string `json:"qrContent"`
+		ReferenceNo        string `json:"referenceNo"`
+		PartnerReferenceNo string `json:"partnerReferenceNo"`
+		ResponseCode       string `json:"responseCode"`
+		ResponseMessage    string `json:"responseMessage"`
+	}
+	if err := json.Unmarshal(respBytes, &qrisResp); err != nil {
+		return "", fmt.Errorf("SNAP QRIS decode: %w", err)
+	}
+	if qrisResp.QrContent == "" {
+		return "", fmt.Errorf("SNAP QRIS empty qrContent (code=%s msg=%s)", qrisResp.ResponseCode, qrisResp.ResponseMessage)
+	}
+
+	log.Printf("[ION] SNAP QRIS created — ref=%s partnerRef=%s", qrisResp.ReferenceNo, qrisResp.PartnerReferenceNo)
+	return qrisResp.QrContent, nil
+}
+
+// ---------------------------------------------------------------------------
+// RSA helpers
+// ---------------------------------------------------------------------------
+
+// loadRSAPrivateKey parses a PKCS#8 RSA private key from a base64-encoded PEM
+// or a raw PEM string (supports both for env var convenience).
+func loadRSAPrivateKey(keyStr string) (*rsa.PrivateKey, error) {
+	var pemBytes []byte
+
+	// If it doesn't look like a PEM header, assume base64-encoded
+	if !strings.HasPrefix(strings.TrimSpace(keyStr), "-----") {
+		decoded, err := base64.StdEncoding.DecodeString(strings.TrimSpace(keyStr))
+		if err != nil {
+			return nil, fmt.Errorf("base64 decode: %w", err)
+		}
+		pemBytes = decoded
+	} else {
+		pemBytes = []byte(keyStr)
+	}
+
+	// Replace literal \n in env vars with real newlines
+	pemBytes = []byte(strings.ReplaceAll(string(pemBytes), `\n`, "\n"))
+
+	block, _ := pem.Decode(pemBytes)
+	if block == nil {
+		return nil, fmt.Errorf("no PEM block found")
+	}
+
+	key, err := x509.ParsePKCS8PrivateKey(block.Bytes)
+	if err != nil {
+		// Fallback: try PKCS1
+		rsaKey, err2 := x509.ParsePKCS1PrivateKey(block.Bytes)
+		if err2 != nil {
+			return nil, fmt.Errorf("PKCS8: %v; PKCS1: %v", err, err2)
+		}
+		return rsaKey, nil
+	}
+	rsaKey, ok := key.(*rsa.PrivateKey)
+	if !ok {
+		return nil, fmt.Errorf("not an RSA private key")
+	}
+	return rsaKey, nil
+}
+
+// signRSASHA256 signs a string with SHA256withRSA (PKCS1v15).
+func signRSASHA256(privKey *rsa.PrivateKey, data string) ([]byte, error) {
+	h := sha256.New()
+	h.Write([]byte(data))
+	digest := h.Sum(nil)
+	return rsa.SignPKCS1v15(rand.Reader, privKey, crypto.SHA256, digest)
+}
+
+// ---------------------------------------------------------------------------
+// Notification + simulation
+// ---------------------------------------------------------------------------
+
 // notifyBPP POSTs a payment-received notification to BPP.
 // This is called asynchronously after a DOKU webhook arrives.
 func (s *ionService) notifyBPP(invoiceNumber, paymentRequestID string, amount float64) {
@@ -496,7 +751,8 @@ func (s *ionService) notifyBPP(invoiceNumber, paymentRequestID string, amount fl
 
 // handleSimulateDoku fires a real DOKU-format webhook signed with ION's HMAC
 // key to the configured DOKU_CALLBACK_URL (ngrok). The request travels:
-//   ION → ngrok → nginx /ion-webhook/ → ION /webhook/doku → verifySignature → notifyBPP → BPP
+//
+//	ION → ngrok → nginx /ion-webhook/ → ION /webhook/doku → verifySignature → notifyBPP → BPP
 //
 // This exercises the full production webhook path without needing DOKU's sandbox
 // to initiate it (DOKU sandbox has no payment simulator API).

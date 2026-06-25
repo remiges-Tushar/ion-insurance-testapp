@@ -81,6 +81,9 @@ services:
       context: ./ion-service
       dockerfile: Dockerfile
     container_name: insurance-ion
+    env_file:
+      - path: ./ion-service/.env
+        required: false
     environment:
       ION_PORT: "8090"
       DOKU_CLIENT_ID: BRN-0299-1782374867869
@@ -88,6 +91,9 @@ services:
       DOKU_BASE_URL: https://api-sandbox.doku.com
       DOKU_CALLBACK_URL: "https://boxy-hurt-smokeless.ngrok-free.dev/ion-webhook/doku"
       BPP_PAYMENT_URL: "http://bpp:8080/webhook/payment-received"
+      # SNAP QRIS: DOKU_SNAP_PRIVATE_KEY loaded from ion-service/.env (gitignored)
+      # Run `make gen-snap-keys` then register ion-service/snap_public.pem in DOKU merchant portal
+      # DOKU_SNAP_CLIENT_ID: MCH-xxxx-xxxxxxxxxxxx  (only if different from DOKU_CLIENT_ID)
     ports:
       - "8090:8090"
     networks:
