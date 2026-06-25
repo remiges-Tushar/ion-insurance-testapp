@@ -40,6 +40,7 @@ func RegisterRoutes(r *gin.Engine, h *Handlers, authSvc *service.AuthService) {
 	api.Use(AuthMiddleware(authSvc))
 	{
 		api.GET("/dashboard/stats", h.GetStats)
+		api.GET("/payment-status", h.GetPaymentStatus)
 
 		api.GET("/policies", h.ListPolicies)
 		api.GET("/policies/:id", h.GetPolicy)

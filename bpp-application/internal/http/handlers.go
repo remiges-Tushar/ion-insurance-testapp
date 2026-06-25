@@ -58,6 +58,20 @@ func (h *Handlers) Login(c *gin.Context) {
 
 // Dashboard
 
+func (h *Handlers) GetPaymentStatus(c *gin.Context) {
+	txnID := c.Query("txn_id")
+	if txnID == "" {
+		writeProblem(c, http.StatusBadRequest, "Bad Request", "txn_id required")
+		return
+	}
+	status, err := h.beckn.GetPaymentStatus(c.Request.Context(), txnID)
+	if err != nil {
+		writeProblem(c, http.StatusNotFound, "Not Found", err.Error())
+		return
+	}
+	c.JSON(http.StatusOK, status)
+}
+
 func (h *Handlers) GetStats(c *gin.Context) {
 	stats, err := h.beckn.GetDashboardStats(c.Request.Context())
 	if err != nil {

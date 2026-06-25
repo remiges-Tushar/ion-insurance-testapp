@@ -340,7 +340,7 @@ function PaymentStep({ initData, onNext, onBack, txnId, annualPremium }) {
   const { t } = useTranslation()
   const [loading, setLoading] = useState(false)
   const [simulating, setSimulating] = useState(false)
-  const [simDone, setSimDone] = useState(false)
+  const [seamStatus, setSeamStatus] = useState(null) // null | {policy_status, payment_received, seam_stage, doku_invoice_number}
   const [error, setError] = useState('')
   const [tab, setTab] = useState('VA')
   const submitting = useRef(false)
@@ -358,7 +358,9 @@ function PaymentStep({ initData, onNext, onBack, txnId, annualPremium }) {
     setError('')
     try {
       await api.post(`/webhook/simulate-payment?txn_id=${txnId}&method=${tab}`)
-      setSimDone(true)
+      // Fetch SEAM status to show the hold proof
+      const status = await api.get(`/api/v1/payment-status?txn_id=${txnId}`)
+      setSeamStatus(status)
     } catch (err) {
       setError(err?.message || 'Simulation failed.')
     } finally {
@@ -387,12 +389,37 @@ function PaymentStep({ initData, onNext, onBack, txnId, annualPremium }) {
     }
   }
 
+  const fundsHeld = seamStatus?.payment_received && seamStatus?.policy_status !== 'ACTIVE'
+
   if (loading) return <Spinner />
 
   return (
     <motion.div initial={{ opacity: 0, x: 20 }} animate={{ opacity: 1, x: 0 }} exit={{ opacity: 0, x: -20 }}>
       <h2 className="text-xl font-bold text-slate-900 mb-6">{t('payment.title')}</h2>
       {error && <div className="mb-4 p-3 bg-red-50 text-red-700 rounded-lg text-sm">{error}</div>}
+
+      {/* SEAM stage indicator — visible after simulate */}
+      {seamStatus && (
+        <div className={`mb-4 p-4 rounded-xl border ${fundsHeld ? 'bg-orange-50 border-orange-200' : 'bg-green-50 border-green-200'}`}>
+          <p className="text-xs font-bold uppercase tracking-wide mb-1 ${fundsHeld ? 'text-orange-700' : 'text-green-700'}">
+            SEAM — {seamStatus.seam_stage}
+          </p>
+          <div className="grid grid-cols-2 gap-x-4 gap-y-1 text-xs mt-2">
+            <span className="text-slate-500">Policy Status</span>
+            <span className={`font-semibold ${seamStatus.policy_status === 'ACTIVE' ? 'text-green-700' : 'text-orange-700'}`}>{seamStatus.policy_status}</span>
+            <span className="text-slate-500">Funds at DOKU</span>
+            <span className={`font-semibold ${fundsHeld ? 'text-orange-700' : 'text-green-700'}`}>{fundsHeld ? 'HELD (not settled yet)' : seamStatus.policy_status === 'ACTIVE' ? 'RELEASED' : '—'}</span>
+            <span className="text-slate-500">Invoice</span>
+            <span className="font-mono text-slate-700">{seamStatus.doku_invoice_number || '—'}</span>
+          </div>
+          {fundsHeld && (
+            <p className="text-xs text-orange-600 mt-2 font-medium">
+              Proof: policy is still PENDING — DOKU is holding the funds. Click "Release &amp; Issue Policy" below to trigger Stage 3.
+            </p>
+          )}
+        </div>
+      )}
+
       <div className="bg-white border border-gray-100 rounded-xl p-6 shadow-sm mb-6 space-y-4">
         <div>
           <p className="text-sm text-slate-500 mb-1">{t('payment.total')}</p>
@@ -401,13 +428,13 @@ function PaymentStep({ initData, onNext, onBack, txnId, annualPremium }) {
         {/* Payment method tabs */}
         <div className="flex rounded-lg border border-gray-200 overflow-hidden">
           <button
-            onClick={() => { setTab('VA'); setSimDone(false) }}
+            onClick={() => { setTab('VA'); setSeamStatus(null) }}
             className={`flex-1 py-2 text-sm font-medium transition-colors ${tab === 'VA' ? 'bg-blue-600 text-white' : 'bg-white text-slate-600 hover:bg-gray-50'}`}
           >
             Virtual Account
           </button>
           <button
-            onClick={() => { setTab('QRIS'); setSimDone(false) }}
+            onClick={() => { setTab('QRIS'); setSeamStatus(null) }}
             className={`flex-1 py-2 text-sm font-medium transition-colors ${tab === 'QRIS' ? 'bg-blue-600 text-white' : 'bg-white text-slate-600 hover:bg-gray-50'}`}
           >
             QRIS
@@ -447,23 +474,25 @@ function PaymentStep({ initData, onNext, onBack, txnId, annualPremium }) {
         {/* Sandbox test helper */}
         <div className="border-t border-dashed border-amber-200 pt-4">
           <p className="text-xs text-amber-600 font-medium mb-1 text-center">⚡ DOKU Sandbox — SEAM Test</p>
-          <p className="text-xs text-slate-400 text-center mb-2">Simulates DOKU webhook: funds held until you confirm below</p>
-          {simDone ? (
-            <p className="text-xs text-green-600 text-center font-medium">Payment hold simulated! Now click "I Have Completed Payment" to trigger SEAM release.</p>
-          ) : (
-            <button
-              onClick={handleSimulate}
-              disabled={simulating}
-              className="w-full py-2 text-sm border border-amber-400 text-amber-700 rounded-lg hover:bg-amber-50 transition-colors disabled:opacity-50"
-            >
-              {simulating ? 'Simulating...' : 'Simulate DOKU VA Payment (SEAM Hold)'}
-            </button>
-          )}
+          <p className="text-xs text-slate-400 text-center mb-2">Step 1: Simulate payment → funds held. Step 2: Confirm → release &amp; issue policy.</p>
+          <button
+            onClick={handleSimulate}
+            disabled={simulating}
+            className="w-full py-2 text-sm border border-amber-400 text-amber-700 rounded-lg hover:bg-amber-50 transition-colors disabled:opacity-50"
+          >
+            {simulating ? 'Simulating...' : fundsHeld ? 'Re-simulate Payment' : 'Simulate DOKU VA Payment (SEAM Hold)'}
+          </button>
         </div>
       </div>
       <div className="flex gap-3">
         <button onClick={onBack} className="flex-1 border border-gray-300 text-slate-600 py-3 rounded-xl font-medium hover:bg-gray-50">{t('common.back')}</button>
-        <button onClick={handlePaid} disabled={loading} className="flex-1 bg-green-600 text-white py-3 rounded-xl font-medium hover:bg-green-700 transition-colors disabled:opacity-60 disabled:cursor-not-allowed">{t('payment.paid')}</button>
+        <button
+          onClick={handlePaid}
+          disabled={loading || !seamStatus?.payment_received}
+          className={`flex-1 py-3 rounded-xl font-medium transition-colors disabled:opacity-60 disabled:cursor-not-allowed ${fundsHeld ? 'bg-orange-500 hover:bg-orange-600 text-white' : 'bg-green-600 hover:bg-green-700 text-white'}`}
+        >
+          {fundsHeld ? 'Release Funds & Issue Policy (SEAM Stage 3)' : t('payment.paid')}
+        </button>
       </div>
     </motion.div>
   )

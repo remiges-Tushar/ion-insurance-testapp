@@ -296,8 +296,9 @@ func (s *BecknService) HandleInit(ctx context.Context, req map[string]any) error
 				va.InvoiceNumber, va.RequestID, va.VANumber, va.BankCode, policyID)
 			vaAccountNumber = va.VANumber
 			bankCode = va.BankCode
+			fmt.Printf("[SEAM Stage 1] VA created — invoice=%s va=%s amount=%d hold_settlement=true\n", invoiceNumber, va.VANumber, totalPremium)
 		} else {
-			fmt.Printf("DOKU create VA failed: %v\n", verr)
+			fmt.Printf("[SEAM] DOKU create VA failed: %v\n", verr)
 		}
 	}
 
@@ -412,11 +413,15 @@ func (s *BecknService) HandleConfirm(ctx context.Context, req map[string]any) er
 		}
 
 		// SEAM Stage 3: release held funds to settlement account(s).
+		fmt.Printf("[SEAM Stage 3] Confirm received — calling DOKU /finance/v1/release invoice=%s amount=%d\n",
+			dokuInvoiceNumber, confirmBreakup.TotalIDR)
 		if s.doku != nil && dokuInvoiceNumber != "" {
 			splits := buildSettlementSplits()
 			if rerr := s.doku.ReleaseSettlement(dokuInvoiceNumber, dokuRequestID, confirmBreakup.TotalIDR, splits); rerr != nil {
 				// Non-fatal in sandbox (bank account may not be configured); log and continue.
-				fmt.Printf("DOKU release settlement (non-fatal in sandbox): %v\n", rerr)
+				fmt.Printf("[SEAM Stage 3] Release call failed (non-fatal in sandbox — no bank account configured): %v\n", rerr)
+			} else {
+				fmt.Printf("[SEAM Stage 3] Release SUCCESS — funds disbursed, issuing policy\n")
 			}
 		}
 
@@ -541,6 +546,8 @@ func (s *BecknService) ProcessDokuPayment(ctx context.Context, invoiceNumber str
 		`INSERT INTO payments (policy_id, method, payment_ref, amount_idr, paid_at) VALUES ($1,'DOKU_VA',$2,$3,NOW())`,
 		policyID, invoiceNumber, int64(amount),
 	)
+	fmt.Printf("[SEAM Stage 2] Payment received — invoice=%s amount=%.0f funds=HELD policy=PENDING_ISSUANCE (NOT yet issued)\n",
+		invoiceNumber, amount)
 	return nil
 }
 
@@ -579,6 +586,37 @@ func buildSettlementSplits() []DokuSplit {
 	return []DokuSplit{
 		{BankAccountSettlementID: bankAcctID, Value: 100.0, Type: "PERCENTAGE"},
 	}
+}
+
+// GetPaymentStatus returns SEAM-relevant payment state for a transaction (used by frontend polling).
+func (s *BecknService) GetPaymentStatus(ctx context.Context, txnID string) (map[string]any, error) {
+	var policyStatus string
+	var paymentReceived bool
+	var dokuInvoiceNumber, dokuVANumber string
+	var amountIDR int64
+	err := s.db.QueryRow(ctx,
+		`SELECT status::text, COALESCE(payment_received,false), COALESCE(doku_invoice_number,''), COALESCE(doku_va_number,''), COALESCE(idv,0)
+		 FROM policies WHERE transaction_id=$1`, txnID,
+	).Scan(&policyStatus, &paymentReceived, &dokuInvoiceNumber, &dokuVANumber, &amountIDR)
+	if err != nil {
+		return nil, fmt.Errorf("policy not found: %w", err)
+	}
+
+	seamStage := "Stage 1 — Order Created"
+	if paymentReceived && policyStatus != "ACTIVE" {
+		seamStage = "Stage 2 — Funds Held at DOKU (awaiting confirm)"
+	} else if policyStatus == "ACTIVE" {
+		seamStage = "Stage 3 — Funds Released, Policy Active"
+	}
+
+	return map[string]any{
+		"transaction_id":      txnID,
+		"policy_status":       policyStatus,
+		"payment_received":    paymentReceived,
+		"doku_invoice_number": dokuInvoiceNumber,
+		"doku_va_number":      dokuVANumber,
+		"seam_stage":          seamStage,
+	}, nil
 }
 
 // HandleStatus returns current policy state.
