@@ -61,9 +61,8 @@ func (d *DokuService) sign(path string, bodyBytes []byte) (map[string]string, st
 	requestID := newRequestID()
 	timestamp := time.Now().UTC().Format("2006-01-02T15:04:05Z")
 
-	// DOKU requires "SHA-256=<base64>" format for the Digest field.
 	hash := sha256.Sum256(bodyBytes)
-	digest := "SHA-256=" + base64.StdEncoding.EncodeToString(hash[:])
+	digest := base64.StdEncoding.EncodeToString(hash[:])
 
 	stringToSign := fmt.Sprintf(
 		"Client-Id:%s\nRequest-Id:%s\nRequest-Timestamp:%s\nRequest-Target:%s\nDigest:%s",
@@ -128,10 +127,12 @@ func (d *DokuService) CreateVirtualAccount(invoiceNumber, customerName string, a
 			"currency":       "IDR",
 			"callback_url":   callbackURL,
 		},
+		"customer": map[string]any{
+			"name": customerName,
+		},
 		"virtual_account_info": map[string]any{
 			"billing_type":    "FIX_BILL",
 			"expired_time":    1440, // 24h in minutes
-			"info1":           customerName,
 			"reusable_status": false,
 		},
 		"additional_info": map[string]any{
