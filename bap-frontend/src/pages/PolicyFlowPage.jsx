@@ -429,24 +429,34 @@ function PaymentStep({ initData, onNext, onBack, txnId, annualPremium }) {
 
         {tab === 'QRIS' && (
           <div className="border-t border-gray-100 pt-4 flex flex-col items-center gap-3">
-            <p className="text-sm text-slate-500">Scan with your mobile banking or e-wallet app</p>
-            <QRCanvas qrString={qrisString} />
-            <p className="text-xs text-slate-400 text-center">QRIS — IDR {Number(totalPremium).toLocaleString()}</p>
+            {qrisString ? (
+              <>
+                <p className="text-sm text-slate-500">Scan with your mobile banking or e-wallet app</p>
+                <QRCanvas qrString={qrisString} />
+                <p className="text-xs text-slate-400 text-center">QRIS — IDR {Number(totalPremium).toLocaleString()}</p>
+              </>
+            ) : (
+              <div className="py-6 text-center">
+                <p className="text-sm text-slate-500 font-medium">DOKU QRIS — Coming Soon</p>
+                <p className="text-xs text-slate-400 mt-1">Use Virtual Account for now</p>
+              </div>
+            )}
           </div>
         )}
 
         {/* Sandbox test helper */}
         <div className="border-t border-dashed border-amber-200 pt-4">
-          <p className="text-xs text-amber-600 font-medium mb-2 text-center">⚡ Sandbox Testing</p>
+          <p className="text-xs text-amber-600 font-medium mb-1 text-center">⚡ DOKU Sandbox — SEAM Test</p>
+          <p className="text-xs text-slate-400 text-center mb-2">Simulates DOKU webhook: funds held until you confirm below</p>
           {simDone ? (
-            <p className="text-xs text-green-600 text-center font-medium">Payment simulated! Now click "I Have Completed Payment" below.</p>
+            <p className="text-xs text-green-600 text-center font-medium">Payment hold simulated! Now click "I Have Completed Payment" to trigger SEAM release.</p>
           ) : (
             <button
               onClick={handleSimulate}
               disabled={simulating}
               className="w-full py-2 text-sm border border-amber-400 text-amber-700 rounded-lg hover:bg-amber-50 transition-colors disabled:opacity-50"
             >
-              {simulating ? 'Simulating...' : `Simulate ${tab === 'QRIS' ? 'QRIS' : 'VA'} Payment (Test)`}
+              {simulating ? 'Simulating...' : 'Simulate DOKU VA Payment (SEAM Hold)'}
             </button>
           )}
         </div>

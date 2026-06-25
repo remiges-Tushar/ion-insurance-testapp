@@ -22,7 +22,7 @@ type BecknService struct {
 	db            *pgxpool.Pool
 	onixBPPCaller string
 	bppID         string
-	xendit        *XenditService
+	doku          *DokuService
 }
 
 func NewBecknService(db *pgxpool.Pool) *BecknService {
@@ -34,7 +34,7 @@ func NewBecknService(db *pgxpool.Pool) *BecknService {
 	if bppID == "" {
 		bppID = "insurance-bpp.iontest"
 	}
-	return &BecknService{db: db, onixBPPCaller: url, bppID: bppID, xendit: NewXenditService()}
+	return &BecknService{db: db, onixBPPCaller: url, bppID: bppID, doku: NewDokuService()}
 }
 
 func (s *BecknService) logMessage(ctx context.Context, action, txnID string, payload map[string]any) {
@@ -277,11 +277,11 @@ func (s *BecknService) HandleInit(ctx context.Context, req map[string]any) error
 		return fmt.Errorf("create policy: %w", err)
 	}
 
-	// Create Xendit VA + QRIS; fall back to mock values if Xendit is unavailable.
+	// Create DOKU VA with hold_settlement=true (SEAM Stage 2 — fund hold).
 	vaAccountNumber := fmt.Sprintf("8800%010d", policyID)
 	bankCode := "MOCK"
 	qrisString := ""
-	if s.xendit != nil && s.xendit.secretKey != "" {
+	if s.doku != nil && s.doku.clientID != "" {
 		breakup, calcErr := CalcPremium("MOTOR_COMPREHENSIVE", "ZONE_3", idvIDR)
 		totalPremium := int64(500_000)
 		if calcErr == nil {
@@ -290,15 +290,14 @@ func (s *BecknService) HandleInit(ctx context.Context, req map[string]any) error
 			totalPremium = idvIDR/30 + adminFeeIDR + stampDutyIDR
 		}
 
-		if va, xerr := s.xendit.CreateVirtualAccount("ins-"+txnID, "ION Insurance", totalPremium); xerr == nil && va.AccountNumber != "" {
-			s.db.Exec(ctx, `UPDATE policies SET xendit_va_id=$1, bank_code=$2 WHERE id=$3`, va.ID, va.BankCode, policyID)
-			vaAccountNumber = va.AccountNumber
+		invoiceNumber := "ins-" + txnID
+		if va, verr := s.doku.CreateVirtualAccount(invoiceNumber, "ION Insurance", totalPremium); verr == nil {
+			s.db.Exec(ctx, `UPDATE policies SET doku_invoice_number=$1, doku_request_id=$2, doku_va_number=$3, bank_code=$4 WHERE id=$5`,
+				va.InvoiceNumber, va.RequestID, va.VANumber, va.BankCode, policyID)
+			vaAccountNumber = va.VANumber
 			bankCode = va.BankCode
-		}
-
-		if qr, qerr := s.xendit.CreateQRIS("ins-"+txnID+"-qris", totalPremium); qerr == nil {
-			s.db.Exec(ctx, `UPDATE policies SET xendit_qris_id=$1, xendit_qris_string=$2 WHERE id=$3`, qr.ID, qr.QRString, policyID)
-			qrisString = qr.QRString
+		} else {
+			fmt.Printf("DOKU create VA failed: %v\n", verr)
 		}
 	}
 
@@ -369,16 +368,17 @@ func (s *BecknService) HandleConfirm(ctx context.Context, req map[string]any) er
 		}
 	}
 
-	// Load policy state + Xendit IDs
+	// Load policy state + DOKU fields
 	var policyID int64
-	var currentStatus, xenditVAID, xenditQRISID string
+	var currentStatus, dokuInvoiceNumber, dokuRequestID string
 	var existingPolicyNumber, existingCertURL string
 	var existingCoverageStart, existingCoverageEnd *time.Time
 	var idvForBreakup int64
+	var paymentReceived bool
 	err := s.db.QueryRow(ctx,
-		`SELECT id, status::text, COALESCE(xendit_va_id,''), COALESCE(xendit_qris_id,''), COALESCE(policy_number,''), COALESCE(certificate_url,''), coverage_start, coverage_end, COALESCE(idv,0)
+		`SELECT id, status::text, COALESCE(doku_invoice_number,''), COALESCE(doku_request_id,''), COALESCE(policy_number,''), COALESCE(certificate_url,''), coverage_start, coverage_end, COALESCE(idv,0), COALESCE(payment_received,false)
 		 FROM policies WHERE transaction_id=$1`, txnID,
-	).Scan(&policyID, &currentStatus, &xenditVAID, &xenditQRISID, &existingPolicyNumber, &existingCertURL, &existingCoverageStart, &existingCoverageEnd, &idvForBreakup)
+	).Scan(&policyID, &currentStatus, &dokuInvoiceNumber, &dokuRequestID, &existingPolicyNumber, &existingCertURL, &existingCoverageStart, &existingCoverageEnd, &idvForBreakup, &paymentReceived)
 	if err != nil {
 		return fmt.Errorf("policy not found for txn %s: %w", txnID, err)
 	}
@@ -405,25 +405,23 @@ func (s *BecknService) HandleConfirm(ctx context.Context, req map[string]any) er
 			policyID,
 		).Scan(&paymentMethod, &paymentRef, &amountPaid)
 	} else {
-		// Verify payment via Xendit based on the method the user chose.
-		if s.xendit != nil {
-			if paymentMethod == "QRIS" && xenditQRISID != "" {
-				payments, verr := s.xendit.GetQRISPayments(xenditQRISID)
-				if verr != nil || len(payments) == 0 {
-					return fmt.Errorf("QRIS payment not yet confirmed by Xendit: scan and pay the QR code first")
-				}
-				amountPaid = int64(payments[0].Amount)
-				paymentRef = xenditQRISID
-			} else if xenditVAID != "" {
-				payments, verr := s.xendit.GetVAPayments(xenditVAID)
-				if verr != nil || len(payments) == 0 {
-					return fmt.Errorf("VA payment not yet confirmed by Xendit: simulate payment in Xendit sandbox first")
-				}
-				amountPaid = int64(payments[0].Amount)
-				paymentMethod = "XENDIT_VA"
-				paymentRef = xenditVAID
+		// SEAM Stage 2→3: payment must have been received (hold set by DOKU webhook)
+		// before confirm triggers the settlement release.
+		if !paymentReceived {
+			return fmt.Errorf("payment not yet received: simulate DOKU VA payment first (sandbox), or complete the bank transfer")
+		}
+
+		// SEAM Stage 3: release held funds to settlement account(s).
+		if s.doku != nil && dokuInvoiceNumber != "" {
+			splits := buildSettlementSplits()
+			if rerr := s.doku.ReleaseSettlement(dokuInvoiceNumber, dokuRequestID, confirmBreakup.TotalIDR, splits); rerr != nil {
+				// Non-fatal in sandbox (bank account may not be configured); log and continue.
+				fmt.Printf("DOKU release settlement (non-fatal in sandbox): %v\n", rerr)
 			}
 		}
+
+		paymentMethod = "DOKU_VA"
+		paymentRef = dokuInvoiceNumber
 
 		var seqNum int
 		s.db.QueryRow(ctx, `SELECT COUNT(*) FROM policies WHERE status='ACTIVE'`).Scan(&seqNum)
@@ -502,21 +500,22 @@ func (s *BecknService) HandleConfirm(ctx context.Context, req map[string]any) er
 	return s.callOnixCaller("on_confirm", response)
 }
 
-// VerifyXenditToken checks the Xendit webhook callback token.
-func (s *BecknService) VerifyXenditToken(token string) bool {
-	if s.xendit == nil {
+// VerifyDokuWebhook validates the HMACSHA256 signature on an incoming DOKU webhook.
+func (s *BecknService) VerifyDokuWebhook(clientID, requestID, timestamp, requestTarget string, body []byte, signature string) bool {
+	if s.doku == nil {
 		return false
 	}
-	return s.xendit.VerifyToken(token)
+	return s.doku.VerifyWebhookSignature(clientID, requestID, timestamp, requestTarget, body, signature)
 }
 
-// ProcessXenditPayment marks the policy as ACTIVE when Xendit's payment webhook fires.
-// externalID format: "ins-{transactionID}".
-func (s *BecknService) ProcessXenditPayment(ctx context.Context, externalID string, amount float64, bankCode string) error {
-	if !strings.HasPrefix(externalID, "ins-") {
-		return fmt.Errorf("unexpected xendit external_id format: %s", externalID)
+// ProcessDokuPayment records that payment has been received and funds are held at DOKU.
+// invoiceNumber format: "ins-{transactionID}".
+// Does NOT issue the policy — that happens only when confirm triggers ReleaseSettlement.
+func (s *BecknService) ProcessDokuPayment(ctx context.Context, invoiceNumber string, amount float64) error {
+	if !strings.HasPrefix(invoiceNumber, "ins-") {
+		return fmt.Errorf("unexpected DOKU invoice_number format: %s", invoiceNumber)
 	}
-	txnID := strings.TrimPrefix(externalID, "ins-")
+	txnID := strings.TrimPrefix(invoiceNumber, "ins-")
 
 	var policyID int64
 	var currentStatus string
@@ -530,104 +529,56 @@ func (s *BecknService) ProcessXenditPayment(ctx context.Context, externalID stri
 		return nil // idempotent
 	}
 
-	var seqNum int
-	s.db.QueryRow(ctx, `SELECT COUNT(*) FROM policies WHERE status='ACTIVE'`).Scan(&seqNum)
-	seqNum++
-
-	policyNumber := fmt.Sprintf("POL-INS-%d-%05d", time.Now().Year(), seqNum)
-	certURL := fmt.Sprintf("https://certificates.insurance.iontest.local/%s.pdf", policyNumber)
-	coverageStart := time.Now().UTC()
-	coverageEnd := coverageStart.AddDate(1, 0, 0)
-
+	// SEAM Stage 2: mark funds as held — policy stays PENDING_ISSUANCE until confirm.
 	_, err = s.db.Exec(ctx,
-		`UPDATE policies SET status='ACTIVE', policy_number=$1, certificate_url=$2, coverage_start=$3, coverage_end=$4 WHERE transaction_id=$5`,
-		policyNumber, certURL, coverageStart, coverageEnd, txnID,
+		`UPDATE policies SET payment_received=true WHERE transaction_id=$1`, txnID,
 	)
 	if err != nil {
-		return fmt.Errorf("update policy: %w", err)
+		return fmt.Errorf("mark payment received: %w", err)
 	}
 
 	s.db.Exec(ctx,
-		`INSERT INTO payments (policy_id, method, payment_ref, amount_idr, paid_at) VALUES ($1,$2,$3,$4,NOW())`,
-		policyID, "XENDIT_VA", externalID, int64(amount),
+		`INSERT INTO payments (policy_id, method, payment_ref, amount_idr, paid_at) VALUES ($1,'DOKU_VA',$2,$3,NOW())`,
+		policyID, invoiceNumber, int64(amount),
 	)
 	return nil
 }
 
-// ProcessXenditQRISPayment marks the policy ACTIVE when a QRIS payment webhook fires.
-// referenceID format: "ins-{transactionID}-qris".
-func (s *BecknService) ProcessXenditQRISPayment(ctx context.Context, referenceID string, amount float64) error {
-	if !strings.HasPrefix(referenceID, "ins-") || !strings.HasSuffix(referenceID, "-qris") {
-		return fmt.Errorf("unexpected QRIS reference_id format: %s", referenceID)
-	}
-	txnID := strings.TrimSuffix(strings.TrimPrefix(referenceID, "ins-"), "-qris")
-
-	var policyID int64
-	var currentStatus string
-	err := s.db.QueryRow(ctx,
-		`SELECT id, status::text FROM policies WHERE transaction_id=$1`, txnID,
-	).Scan(&policyID, &currentStatus)
-	if err != nil {
-		return fmt.Errorf("policy not found for txn %s: %w", txnID, err)
-	}
-	if currentStatus == "ACTIVE" {
-		return nil
-	}
-
-	var seqNum int
-	s.db.QueryRow(ctx, `SELECT COUNT(*) FROM policies WHERE status='ACTIVE'`).Scan(&seqNum)
-	seqNum++
-
-	policyNumber := fmt.Sprintf("POL-INS-%d-%05d", time.Now().Year(), seqNum)
-	certURL := fmt.Sprintf("https://certificates.insurance.iontest.local/%s.pdf", policyNumber)
-	coverageStart := time.Now().UTC()
-	coverageEnd := coverageStart.AddDate(1, 0, 0)
-
-	_, err = s.db.Exec(ctx,
-		`UPDATE policies SET status='ACTIVE', policy_number=$1, certificate_url=$2, coverage_start=$3, coverage_end=$4 WHERE transaction_id=$5`,
-		policyNumber, certURL, coverageStart, coverageEnd, txnID,
-	)
-	if err != nil {
-		return fmt.Errorf("update policy: %w", err)
-	}
-
-	s.db.Exec(ctx,
-		`INSERT INTO payments (policy_id, method, payment_ref, amount_idr, paid_at) VALUES ($1,$2,$3,$4,NOW())`,
-		policyID, "XENDIT_QRIS", referenceID, int64(amount),
-	)
-	return nil
-}
-
-// SimulatePayment triggers a Xendit sandbox payment for testing.
-// method: "VA" or "QRIS"
+// SimulatePayment triggers a sandbox payment for testing by directly marking payment_received.
 func (s *BecknService) SimulatePayment(ctx context.Context, txnID, method string) error {
-	if s.xendit == nil || s.xendit.secretKey == "" {
-		return fmt.Errorf("xendit not configured")
-	}
-
-	var xenditVAID, xenditQRISID string
+	var dokuInvoiceNumber string
 	var idv int64
 	err := s.db.QueryRow(ctx,
-		`SELECT COALESCE(xendit_va_id,''), COALESCE(xendit_qris_id,''), COALESCE(idv,0)
+		`SELECT COALESCE(doku_invoice_number,''), COALESCE(idv,0)
 		 FROM policies WHERE transaction_id=$1`, txnID,
-	).Scan(&xenditVAID, &xenditQRISID, &idv)
+	).Scan(&dokuInvoiceNumber, &idv)
 	if err != nil {
 		return fmt.Errorf("policy not found: %w", err)
 	}
 
 	breakup, calcErr := CalcPremium("MOTOR_COMPREHENSIVE", "ZONE_3", idv)
-	var amount int64 = 500_000
+	var amount float64 = 500_000
 	if calcErr == nil {
-		amount = breakup.TotalIDR
+		amount = float64(breakup.TotalIDR)
 	}
 
-	if method == "QRIS" {
-		if xenditQRISID == "" {
-			return fmt.Errorf("no QRIS ID on record for this policy")
-		}
-		return s.xendit.SimulateQRISPayment(xenditQRISID, amount)
+	if dokuInvoiceNumber == "" {
+		dokuInvoiceNumber = "ins-" + txnID
 	}
-	return s.xendit.SimulateVAPayment("ins-"+txnID, amount)
+
+	// Simulate DOKU webhook: set payment_received=true directly (sandbox only).
+	return s.ProcessDokuPayment(ctx, dokuInvoiceNumber, amount)
+}
+
+// buildSettlementSplits returns override_settlement entries from env config.
+func buildSettlementSplits() []DokuSplit {
+	bankAcctID := os.Getenv("DOKU_BPP_BANK_ACCOUNT_ID")
+	if bankAcctID == "" {
+		return nil
+	}
+	return []DokuSplit{
+		{BankAccountSettlementID: bankAcctID, Value: 100.0, Type: "PERCENTAGE"},
+	}
 }
 
 // HandleStatus returns current policy state.

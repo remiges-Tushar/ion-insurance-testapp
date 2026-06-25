@@ -2,6 +2,8 @@ package transport
 
 import (
 	"context"
+	"encoding/json"
+	"io"
 	"net/http"
 	"strconv"
 
@@ -394,61 +396,52 @@ func (h *Handlers) WebhookOnPublish(c *gin.Context) {
 	c.JSON(http.StatusOK, ackACK())
 }
 
-// Webhook: Xendit payment notification
-func (h *Handlers) HandleXenditWebhook(c *gin.Context) {
-	token := c.GetHeader("x-callback-token")
-	if !h.beckn.VerifyXenditToken(token) {
-		c.JSON(http.StatusForbidden, gin.H{"error": "invalid callback token"})
+// Webhook: DOKU payment notification (VA and QRIS)
+func (h *Handlers) HandleDokuWebhook(c *gin.Context) {
+	bodyBytes, err := io.ReadAll(c.Request.Body)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "cannot read body"})
 		return
 	}
+
+	clientID := c.GetHeader("Client-Id")
+	requestID := c.GetHeader("Request-Id")
+	timestamp := c.GetHeader("Request-Timestamp")
+	signature := c.GetHeader("Signature")
+
+	if !h.beckn.VerifyDokuWebhook(clientID, requestID, timestamp, "/webhook/doku", bodyBytes, signature) {
+		c.JSON(http.StatusForbidden, gin.H{"error": "invalid signature"})
+		return
+	}
+
 	var body map[string]any
-	if err := c.ShouldBindJSON(&body); err != nil {
+	if err := json.Unmarshal(bodyBytes, &body); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
-	externalID, _ := body["external_id"].(string)
-	amount, _ := body["amount"].(float64)
-	bankCode, _ := body["bank_code"].(string)
 
-	if err := h.beckn.ProcessXenditPayment(c.Request.Context(), externalID, amount, bankCode); err != nil {
-		// Return 200 so Xendit does not retry; error is already logged by the service.
+	// Distinguish VA vs QRIS by service.id in the webhook payload.
+	service, _ := body["service"].(map[string]any)
+	_ = service // both VA and QRIS share the same invoice_number path
+
+	order, _ := body["order"].(map[string]any)
+	invoiceNumber, _ := order["invoice_number"].(string)
+	amount, _ := order["amount"].(float64)
+
+	if invoiceNumber == "" {
+		c.JSON(http.StatusOK, gin.H{"status": "ignored", "reason": "no invoice_number"})
+		return
+	}
+
+	if err := h.beckn.ProcessDokuPayment(c.Request.Context(), invoiceNumber, amount); err != nil {
+		// Return 200 so DOKU does not retry; error is logged by the service.
 		c.JSON(http.StatusOK, gin.H{"status": "received", "error": err.Error()})
 		return
 	}
 	c.JSON(http.StatusOK, gin.H{"status": "ok"})
 }
 
-// Webhook: Xendit QRIS payment notification
-func (h *Handlers) HandleXenditQRISWebhook(c *gin.Context) {
-	token := c.GetHeader("x-callback-token")
-	if !h.beckn.VerifyXenditToken(token) {
-		c.JSON(http.StatusForbidden, gin.H{"error": "invalid callback token"})
-		return
-	}
-	var body map[string]any
-	if err := c.ShouldBindJSON(&body); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
-		return
-	}
-	// QRIS webhook: { "event": "qr.payment", "data": { "reference_id": "...", "amount": ..., "status": "SUCCEEDED" } }
-	data, _ := body["data"].(map[string]any)
-	referenceID, _ := data["reference_id"].(string)
-	amount, _ := data["amount"].(float64)
-	status, _ := data["status"].(string)
-
-	if status != "SUCCEEDED" {
-		c.JSON(http.StatusOK, gin.H{"status": "ignored", "payment_status": status})
-		return
-	}
-
-	if err := h.beckn.ProcessXenditQRISPayment(c.Request.Context(), referenceID, amount); err != nil {
-		c.JSON(http.StatusOK, gin.H{"status": "received", "error": err.Error()})
-		return
-	}
-	c.JSON(http.StatusOK, gin.H{"status": "ok"})
-}
-
-// SimulatePayment — sandbox only, triggers Xendit test payment
+// SimulatePayment — sandbox only, marks payment_received=true to simulate DOKU webhook
 func (h *Handlers) SimulatePayment(c *gin.Context) {
 	txnID := c.Query("txn_id")
 	method := c.DefaultQuery("method", "VA") // VA or QRIS
