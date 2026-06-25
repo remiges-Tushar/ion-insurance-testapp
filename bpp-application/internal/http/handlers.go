@@ -2,8 +2,6 @@ package transport
 
 import (
 	"context"
-	"encoding/json"
-	"io"
 	"net/http"
 	"strconv"
 
@@ -410,64 +408,52 @@ func (h *Handlers) WebhookOnPublish(c *gin.Context) {
 	c.JSON(http.StatusOK, ackACK())
 }
 
-// Webhook: DOKU payment notification (VA and QRIS)
-func (h *Handlers) HandleDokuWebhook(c *gin.Context) {
-	bodyBytes, err := io.ReadAll(c.Request.Body)
-	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "cannot read body"})
-		return
+// HandlePaymentReceived — called by ION service after DOKU payment webhook (not Beckn).
+// ION receives the DOKU webhook, verifies signature, then POSTs here.
+func (h *Handlers) HandlePaymentReceived(c *gin.Context) {
+	var body struct {
+		InvoiceNumber     string  `json:"invoice_number"`
+		PaymentRequestID  string  `json:"payment_request_id"`
+		Amount            float64 `json:"amount"`
 	}
-
-	clientID := c.GetHeader("Client-Id")
-	requestID := c.GetHeader("Request-Id")
-	timestamp := c.GetHeader("Request-Timestamp")
-	signature := c.GetHeader("Signature")
-
-	if !h.beckn.VerifyDokuWebhook(clientID, requestID, timestamp, "/webhook/doku", bodyBytes, signature) {
-		c.JSON(http.StatusForbidden, gin.H{"error": "invalid signature"})
-		return
-	}
-
-	var body map[string]any
-	if err := json.Unmarshal(bodyBytes, &body); err != nil {
+	if err := c.ShouldBindJSON(&body); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
-
-	// Distinguish VA vs QRIS by service.id in the webhook payload.
-	service, _ := body["service"].(map[string]any)
-	_ = service // both VA and QRIS share the same invoice_number path
-
-	order, _ := body["order"].(map[string]any)
-	invoiceNumber, _ := order["invoice_number"].(string)
-	amount, _ := order["amount"].(float64)
-
-	if invoiceNumber == "" {
-		c.JSON(http.StatusOK, gin.H{"status": "ignored", "reason": "no invoice_number"})
+	if body.InvoiceNumber == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invoice_number required"})
 		return
 	}
-
-	if err := h.beckn.ProcessDokuPayment(c.Request.Context(), invoiceNumber, amount); err != nil {
-		// Return 200 so DOKU does not retry; error is logged by the service.
+	if err := h.beckn.HandlePaymentReceived(c.Request.Context(), body.InvoiceNumber, body.PaymentRequestID, body.Amount); err != nil {
 		c.JSON(http.StatusOK, gin.H{"status": "received", "error": err.Error()})
 		return
 	}
 	c.JSON(http.StatusOK, gin.H{"status": "ok"})
 }
 
-// SimulatePayment — sandbox only, marks payment_received=true to simulate DOKU webhook
+// WebhookReconcile handles the Beckn reconcile action from BAP (via onix-bpp).
+func (h *Handlers) WebhookReconcile(c *gin.Context) {
+	var req map[string]any
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, ackNACK())
+		return
+	}
+	go h.beckn.HandleReconcile(context.Background(), req)
+	c.JSON(http.StatusOK, ackACK())
+}
+
+// SimulatePayment — sandbox only: marks payment_received=true without going through DOKU.
 func (h *Handlers) SimulatePayment(c *gin.Context) {
 	txnID := c.Query("txn_id")
-	method := c.DefaultQuery("method", "VA") // VA or QRIS
 	if txnID == "" {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "txn_id required"})
 		return
 	}
-	if err := h.beckn.SimulatePayment(c.Request.Context(), txnID, method); err != nil {
+	if err := h.beckn.SimulatePayment(c.Request.Context(), txnID); err != nil {
 		c.JSON(http.StatusBadGateway, gin.H{"error": err.Error()})
 		return
 	}
-	c.JSON(http.StatusOK, gin.H{"status": "simulated", "method": method})
+	c.JSON(http.StatusOK, gin.H{"status": "simulated"})
 }
 
 func ackACK() map[string]any {

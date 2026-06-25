@@ -325,3 +325,15 @@ func (h *Handlers) OnSupport(c *gin.Context) {
 	}
 	c.JSON(http.StatusOK, ackACK())
 }
+
+func (h *Handlers) OnReconcile(c *gin.Context) {
+	var payload map[string]any
+	if err := c.ShouldBindJSON(&payload); err != nil {
+		c.JSON(http.StatusBadRequest, ackNACK())
+		return
+	}
+	if err := h.svc.HandleCallback(c.Request.Context(), "on_reconcile", payload); err != nil {
+		_ = err
+	}
+	c.JSON(http.StatusOK, ackACK())
+}

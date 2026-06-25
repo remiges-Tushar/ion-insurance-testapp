@@ -340,25 +340,43 @@ function PaymentStep({ initData, onNext, onBack, txnId, annualPremium }) {
   const { t } = useTranslation()
   const [loading, setLoading] = useState(false)
   const [simulating, setSimulating] = useState(false)
-  const [seamStatus, setSeamStatus] = useState(null) // null | {policy_status, payment_received, seam_stage, doku_invoice_number}
+  const [seamStatus, setSeamStatus] = useState(null)
   const [error, setError] = useState('')
   const [tab, setTab] = useState('VA')
   const submitting = useRef(false)
 
-  // VA details are in considerationAttributes; commitmentAttributes is the fallback
+  // VA/QRIS details injected by BAP from ION service into considerationAttributes
   const considerationAttrs = initData?.message?.contract?.commitments?.[0]?.considerationAttributes || {}
   const commitmentAttrs = initData?.message?.contract?.commitments?.[0]?.commitmentAttributes || {}
   const totalPremium = considerationAttrs.totalAmountIDR || annualPremium || 0
   const virtualAccount = considerationAttrs.virtualAccount || commitmentAttrs.virtualAccount || '—'
   const bankCode = considerationAttrs.bankCode || commitmentAttrs.bankCode || ''
   const qrisString = considerationAttrs.qrisString || ''
+  const howToPayPage = considerationAttrs.howToPayPage || ''
+
+  // Auto-poll BPP payment status every 3s until payment received
+  useEffect(() => {
+    if (!txnId || seamStatus?.payment_received) return
+    const interval = setInterval(async () => {
+      try {
+        const status = await api.get(`/webhook/payment-status?txn_id=${txnId}`)
+        setSeamStatus(status)
+      } catch {}
+    }, 3000)
+    return () => clearInterval(interval)
+  }, [txnId, seamStatus?.payment_received])
 
   async function handleSimulate() {
     setSimulating(true)
     setError('')
     try {
-      await api.post(`/webhook/simulate-payment?txn_id=${txnId}&method=${tab}`)
-      // Fetch SEAM status to show the hold proof
+      const invoiceNumber = seamStatus?.doku_invoice_number || `ins-${txnId}`
+      // ION signs a DOKU-format webhook and fires it to ngrok → nginx → ION → BPP
+      await api.post('/ion/payment/simulate', {
+        invoice_number: invoiceNumber,
+        amount: Number(totalPremium),
+      })
+      // Poll once immediately after simulate
       const status = await api.get(`/webhook/payment-status?txn_id=${txnId}`)
       setSeamStatus(status)
     } catch (err) {
@@ -398,25 +416,30 @@ function PaymentStep({ initData, onNext, onBack, txnId, annualPremium }) {
       <h2 className="text-xl font-bold text-slate-900 mb-6">{t('payment.title')}</h2>
       {error && <div className="mb-4 p-3 bg-red-50 text-red-700 rounded-lg text-sm">{error}</div>}
 
-      {/* SEAM stage indicator — visible after simulate */}
-      {seamStatus && (
+      {/* SEAM stage indicator */}
+      {seamStatus ? (
         <div className={`mb-4 p-4 rounded-xl border ${fundsHeld ? 'bg-orange-50 border-orange-200' : 'bg-green-50 border-green-200'}`}>
-          <p className="text-xs font-bold uppercase tracking-wide mb-1 ${fundsHeld ? 'text-orange-700' : 'text-green-700'}">
+          <p className={`text-xs font-bold uppercase tracking-wide mb-1 ${fundsHeld ? 'text-orange-700' : 'text-green-700'}`}>
             SEAM — {seamStatus.seam_stage}
           </p>
           <div className="grid grid-cols-2 gap-x-4 gap-y-1 text-xs mt-2">
             <span className="text-slate-500">Policy Status</span>
             <span className={`font-semibold ${seamStatus.policy_status === 'ACTIVE' ? 'text-green-700' : 'text-orange-700'}`}>{seamStatus.policy_status}</span>
             <span className="text-slate-500">Funds at DOKU</span>
-            <span className={`font-semibold ${fundsHeld ? 'text-orange-700' : 'text-green-700'}`}>{fundsHeld ? 'HELD (not settled yet)' : seamStatus.policy_status === 'ACTIVE' ? 'RELEASED' : '—'}</span>
+            <span className={`font-semibold ${fundsHeld ? 'text-orange-700' : 'text-green-700'}`}>{fundsHeld ? 'HELD' : '—'}</span>
             <span className="text-slate-500">Invoice</span>
             <span className="font-mono text-slate-700">{seamStatus.doku_invoice_number || '—'}</span>
           </div>
           {fundsHeld && (
             <p className="text-xs text-orange-600 mt-2 font-medium">
-              Proof: policy is still PENDING — DOKU is holding the funds. Click "Release &amp; Issue Policy" below to trigger Stage 3.
+              Funds held at DOKU. Click "Confirm Payment" to issue the policy.
             </p>
           )}
+        </div>
+      ) : (
+        <div className="mb-4 p-3 rounded-xl border border-blue-100 bg-blue-50 flex items-center gap-2">
+          <Loader2 size={14} className="animate-spin text-blue-500" />
+          <span className="text-xs text-blue-600">Waiting for payment confirmation via ION…</span>
         </div>
       )}
 
@@ -425,16 +448,17 @@ function PaymentStep({ initData, onNext, onBack, txnId, annualPremium }) {
           <p className="text-sm text-slate-500 mb-1">{t('payment.total')}</p>
           <p className="text-3xl font-bold text-slate-900">IDR {Number(totalPremium).toLocaleString()}</p>
         </div>
+
         {/* Payment method tabs */}
         <div className="flex rounded-lg border border-gray-200 overflow-hidden">
           <button
-            onClick={() => { setTab('VA'); setSeamStatus(null) }}
+            onClick={() => setTab('VA')}
             className={`flex-1 py-2 text-sm font-medium transition-colors ${tab === 'VA' ? 'bg-blue-600 text-white' : 'bg-white text-slate-600 hover:bg-gray-50'}`}
           >
             Virtual Account
           </button>
           <button
-            onClick={() => { setTab('QRIS'); setSeamStatus(null) }}
+            onClick={() => setTab('QRIS')}
             className={`flex-1 py-2 text-sm font-medium transition-colors ${tab === 'QRIS' ? 'bg-blue-600 text-white' : 'bg-white text-slate-600 hover:bg-gray-50'}`}
           >
             QRIS
@@ -451,6 +475,16 @@ function PaymentStep({ initData, onNext, onBack, txnId, annualPremium }) {
               {virtualAccount}
             </div>
             <p className="text-xs text-slate-400 mt-2 text-center">Transfer the exact amount to this virtual account</p>
+            {howToPayPage && (
+              <a
+                href={howToPayPage}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="mt-3 w-full block text-center py-2 text-sm bg-blue-600 hover:bg-blue-700 text-white rounded-lg font-medium transition-colors"
+              >
+                Pay on DOKU Sandbox (triggers real webhook)
+              </a>
+            )}
           </div>
         )}
 
@@ -464,34 +498,34 @@ function PaymentStep({ initData, onNext, onBack, txnId, annualPremium }) {
               </>
             ) : (
               <div className="py-6 text-center">
-                <p className="text-sm text-slate-500 font-medium">DOKU QRIS — Coming Soon</p>
-                <p className="text-xs text-slate-400 mt-1">Use Virtual Account for now</p>
+                <p className="text-sm text-slate-500 font-medium">QRIS not available for this merchant</p>
+                <p className="text-xs text-slate-400 mt-1">Use Virtual Account tab to pay</p>
               </div>
             )}
           </div>
         )}
 
-        {/* Sandbox test helper */}
+        {/* Sandbox simulate fallback */}
         <div className="border-t border-dashed border-amber-200 pt-4">
-          <p className="text-xs text-amber-600 font-medium mb-1 text-center">⚡ DOKU Sandbox — SEAM Test</p>
-          <p className="text-xs text-slate-400 text-center mb-2">Step 1: Simulate payment → funds held. Step 2: Confirm → release &amp; issue policy.</p>
+          <p className="text-xs text-amber-600 font-medium mb-1 text-center">Sandbox — no real payment available?</p>
           <button
             onClick={handleSimulate}
-            disabled={simulating}
+            disabled={simulating || fundsHeld}
             className="w-full py-2 text-sm border border-amber-400 text-amber-700 rounded-lg hover:bg-amber-50 transition-colors disabled:opacity-50"
           >
-            {simulating ? 'Simulating...' : fundsHeld ? 'Re-simulate Payment' : 'Simulate DOKU VA Payment (SEAM Hold)'}
+            {simulating ? 'Simulating…' : fundsHeld ? 'Payment received ✓' : 'Simulate Payment (local bypass)'}
           </button>
         </div>
       </div>
+
       <div className="flex gap-3">
         <button onClick={onBack} className="flex-1 border border-gray-300 text-slate-600 py-3 rounded-xl font-medium hover:bg-gray-50">{t('common.back')}</button>
         <button
           onClick={handlePaid}
           disabled={loading || !seamStatus?.payment_received}
-          className={`flex-1 py-3 rounded-xl font-medium transition-colors disabled:opacity-60 disabled:cursor-not-allowed ${fundsHeld ? 'bg-orange-500 hover:bg-orange-600 text-white' : 'bg-green-600 hover:bg-green-700 text-white'}`}
+          className="flex-1 py-3 rounded-xl font-medium transition-colors disabled:opacity-60 disabled:cursor-not-allowed bg-orange-500 hover:bg-orange-600 text-white"
         >
-          {fundsHeld ? 'Release Funds & Issue Policy (SEAM Stage 3)' : t('payment.paid')}
+          {fundsHeld ? 'Confirm Payment (SEAM Stage 3)' : t('payment.paid')}
         </button>
       </div>
     </motion.div>
@@ -499,6 +533,29 @@ function PaymentStep({ initData, onNext, onBack, txnId, annualPremium }) {
 }
 
 // Step 5: Policy Issued
+function SeamStageBar({ stage }) {
+  const stages = [
+    { key: 'va_created',     label: 'VA Created' },
+    { key: 'payment_held',   label: 'Payment Held' },
+    { key: 'policy_issued',  label: 'Policy Issued' },
+    { key: 'reconciling',    label: 'Reconciling' },
+    { key: 'settled',        label: 'Settled' },
+  ]
+  const activeIdx = stages.findIndex(s => s.key === stage)
+  return (
+    <div className="flex items-center gap-1 w-full">
+      {stages.map((s, i) => (
+        <div key={s.key} className="flex-1 flex flex-col items-center gap-1">
+          <div className={`h-1.5 w-full rounded-full ${i <= activeIdx ? 'bg-blue-500' : 'bg-gray-200'}`} />
+          <span className={`text-[9px] font-medium ${i === activeIdx ? 'text-blue-600' : i < activeIdx ? 'text-green-600' : 'text-slate-400'}`}>
+            {s.label}
+          </span>
+        </div>
+      ))}
+    </div>
+  )
+}
+
 function PolicyIssuedStep({ confirmData, txnId }) {
   const { t } = useTranslation()
   const navigate = useNavigate()
@@ -509,6 +566,22 @@ function PolicyIssuedStep({ confirmData, txnId }) {
   const certificateUrl = attrs.certificateUrl
   const coverageStart = attrs.coverageStart || attrs.coverageStartDate
   const coverageEnd = attrs.coverageEnd || attrs.coverageEndDate
+
+  // SEAM settlement polling
+  const [seamStage, setSeamStage] = useState('policy_issued')
+
+  useEffect(() => {
+    if (!txnId || seamStage === 'settled') return
+    const interval = setInterval(async () => {
+      try {
+        const status = await api.get(`/api/v1/status/${txnId}`)
+        if (status?.status === 'SETTLED') setSeamStage('settled')
+        else if (status?.status === 'RECONCILING') setSeamStage('reconciling')
+        else if (status?.action === 'confirm' || status?.latest_on_action === 'on_confirm') setSeamStage('policy_issued')
+      } catch {}
+    }, 3000)
+    return () => clearInterval(interval)
+  }, [txnId, seamStage])
 
   // Rating state
   const [rating, setRating] = useState(0)
@@ -588,6 +661,18 @@ function PolicyIssuedStep({ confirmData, txnId }) {
             <span className="font-medium text-slate-900 text-sm">{fmtDate(coverageEnd)}</span>
           </div>
         )}
+      </div>
+
+      {/* SEAM settlement progress */}
+      <div className="bg-white border border-gray-100 rounded-xl p-4 shadow-sm mb-4">
+        <div className="flex items-center justify-between mb-3">
+          <span className="text-xs font-semibold text-slate-600 uppercase tracking-wide">SEAM Settlement</span>
+          {seamStage === 'settled'
+            ? <span className="text-xs font-bold text-green-600 bg-green-50 px-2 py-0.5 rounded-full">SETTLED</span>
+            : <span className="flex items-center gap-1 text-xs text-blue-600"><Loader2 size={12} className="animate-spin" /> In progress</span>
+          }
+        </div>
+        <SeamStageBar stage={seamStage} />
       </div>
 
       {certificateUrl && (

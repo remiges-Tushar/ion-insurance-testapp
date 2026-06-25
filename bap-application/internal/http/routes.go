@@ -46,5 +46,6 @@ func RegisterRoutes(r *gin.Engine, h *Handlers) {
 		wh.POST("/on_cancel", h.OnCancel)
 		wh.POST("/on_rate", h.OnRate)
 		wh.POST("/on_support", h.OnSupport)
+		wh.POST("/on_reconcile", h.OnReconcile)
 	}
 }

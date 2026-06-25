@@ -12,3 +12,4 @@ routingRules:
       - on_cancel
       - on_rate
       - on_support
+      - on_reconcile

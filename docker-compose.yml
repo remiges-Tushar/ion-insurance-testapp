@@ -76,6 +76,23 @@ services:
     networks:
       - insurance_network
 
+  ion:
+    build:
+      context: ./ion-service
+      dockerfile: Dockerfile
+    container_name: insurance-ion
+    environment:
+      ION_PORT: "8090"
+      DOKU_CLIENT_ID: BRN-0299-1782374867869
+      DOKU_SECRET_KEY: SK-RZNjjFOg8s8i3FHIoB4m
+      DOKU_BASE_URL: https://api-sandbox.doku.com
+      DOKU_CALLBACK_URL: "https://boxy-hurt-smokeless.ngrok-free.dev/ion-webhook/doku"
+      BPP_PAYMENT_URL: "http://bpp:8080/webhook/payment-received"
+    ports:
+      - "8090:8090"
+    networks:
+      - insurance_network
+
   onix-bpp:
     image: fidedocker/onix-adapter
     container_name: insurance-onix-bpp
@@ -88,6 +105,9 @@ services:
     volumes:
       - ./config:/app/config:ro
     command: ["./server", "--config=/app/config/insurance-bpp.yaml"]
+    dns:
+      - 8.8.8.8
+      - 1.1.1.1
     depends_on:
       redis:
         condition: service_healthy
@@ -106,6 +126,9 @@ services:
     volumes:
       - ./config:/app/config:ro
     command: ["./server", "--config=/app/config/insurance-bap.yaml"]
+    dns:
+      - 8.8.8.8
+      - 1.1.1.1
     depends_on:
       redis:
         condition: service_healthy
@@ -129,11 +152,9 @@ services:
       BPP_SERVER_PORT: "8080"
       BPP_JWT_SECRET: insurance-bpp-jwt-secret-change-in-production
       BPP_ONIX_BPP_CALLER_URL: http://onix-bpp:8082/bpp/caller
-      DOKU_CLIENT_ID: BRN-0299-1782374867869
-      DOKU_SECRET_KEY: SK-RZNjjFOg8s8i3FHIoB4m
-      DOKU_BASE_URL: https://api-sandbox.doku.com
-      DOKU_CALLBACK_URL: "https://boxy-hurt-smokeless.ngrok-free.dev/webhook/doku"
-      DOKU_BPP_BANK_ACCOUNT_ID: ""
+      ION_SERVICE_URL: "http://ion:8090"
+      DOKU_BPP_BANK_ACCOUNT_ID: BNK-0002-1782383276041
+      DOKU_BAP_BANK_ACCOUNT_ID: BNK-0001-1782383221155
     depends_on:
       migrate-bpp:
         condition: service_completed_successfully
@@ -159,6 +180,7 @@ services:
       BAP_SERVER_PORT: "8083"
       BAP_REDIS_ADDR: redis:6379
       BAP_ONIX_BAP_CALLER_URL: http://onix-bap:8081/bap/caller
+      ION_SERVICE_URL: "http://ion:8090"
     depends_on:
       migrate-bap:
         condition: service_completed_successfully

@@ -26,6 +26,7 @@ type DokuVA struct {
 	RequestID     string
 	VANumber      string
 	BankCode      string
+	HowToPayPage  string // DOKU sandbox payment page URL — open this to simulate a real payment
 }
 
 type DokuSplit struct {
@@ -153,6 +154,7 @@ func (d *DokuService) CreateVirtualAccount(invoiceNumber, customerName string, a
 		VirtualAccountInfo struct {
 			BankCode             string `json:"bank_code"`
 			VirtualAccountNumber string `json:"virtual_account_number"`
+			HowToPayPage         string `json:"how_to_pay_page"`
 		} `json:"virtual_account_info"`
 		Response struct {
 			Code    string `json:"code"`
@@ -175,6 +177,7 @@ func (d *DokuService) CreateVirtualAccount(invoiceNumber, customerName string, a
 		RequestID:     requestID,
 		VANumber:      resp.VirtualAccountInfo.VirtualAccountNumber,
 		BankCode:      bankCode,
+		HowToPayPage:  resp.VirtualAccountInfo.HowToPayPage,
 	}, nil
 }
 
@@ -208,6 +211,23 @@ func (d *DokuService) ReleaseSettlement(invoiceNumber, originalRequestID string,
 	}
 	if status != http.StatusOK && status != http.StatusCreated {
 		return fmt.Errorf("doku release: HTTP %d: %s", status, string(body))
+	}
+	return nil
+}
+
+// SimulateVAPayment calls DOKU sandbox's simulation endpoint to trigger a real webhook.
+// This is only available in sandbox and causes DOKU to POST to our DOKU_CALLBACK_URL.
+func (d *DokuService) SimulateVAPayment(vaNumber string, amount int64) error {
+	payload := map[string]any{
+		"virtual_account_number": vaNumber,
+		"amount":                 amount,
+	}
+	body, status, _, err := d.doRequest("POST", "/doku-virtual-account/v2/payment-code/simulate-payment", payload)
+	if err != nil {
+		return fmt.Errorf("doku simulate VA: %w", err)
+	}
+	if status != http.StatusOK && status != http.StatusCreated {
+		return fmt.Errorf("doku simulate VA: HTTP %d: %s", status, string(body))
 	}
 	return nil
 }

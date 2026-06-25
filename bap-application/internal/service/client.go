@@ -8,6 +8,7 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"os"
 	"strings"
 	"time"
 
@@ -25,15 +26,24 @@ type ClientService struct {
 	db               *pgxpool.Pool
 	cb               *CallbackManager
 	onixBAPCallerURL string
+	ionServiceURL    string
+	bppWebhookURL    string
 }
 
 // NewClientService constructs a ClientService.
 // onixBAPCallerURL is typically read from env BAP_ONIX_BAP_CALLER_URL.
-func NewClientService(db *pgxpool.Pool, cb *CallbackManager, onixBAPCallerURL string) *ClientService {
+// ionServiceURL is typically read from env ION_SERVICE_URL.
+func NewClientService(db *pgxpool.Pool, cb *CallbackManager, onixBAPCallerURL, ionServiceURL string) *ClientService {
+	bppURL := os.Getenv("BPP_WEBHOOK_URL")
+	if bppURL == "" {
+		bppURL = "http://bpp:8080/webhook"
+	}
 	return &ClientService{
 		db:               db,
 		cb:               cb,
 		onixBAPCallerURL: onixBAPCallerURL,
+		ionServiceURL:    ionServiceURL,
+		bppWebhookURL:    bppURL,
 	}
 }
 
@@ -488,7 +498,46 @@ func (s *ClientService) HandleCallback(ctx context.Context, onAction string, pay
 	txnId, _ := ctxMap["transaction_id"].(string)
 	msgId, _ := ctxMap["message_id"].(string)
 
-	// Persist snapshot and audit log.
+	// SEAM Stage 1: on on_init, BAP calls ION to create VA and QRIS, then injects
+	// the payment instrument details into the payload before saving snapshot + publish.
+	// This enriched payload is what the frontend sees in the response to Init().
+	if onAction == "on_init" && txnId != "" {
+		// Upsert first so the UPDATE for doku_va_number has a row to hit.
+		s.upsertTransaction(ctx, txnId, "init", "INIT_RECEIVED")
+		totalIDR := extractTotalIDRFromOnInit(payload)
+		invoiceNumber := "ins-" + txnId
+
+		ionCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
+		defer cancel()
+
+		if va, err := s.callIONCreateVA(ionCtx, invoiceNumber, totalIDR); err == nil {
+			injectIntoConsiderationAttributes(payload, map[string]any{
+				"virtualAccount": va["va_number"],
+				"bankCode":       va["bank_code"],
+				"howToPayPage":   va["how_to_pay_page"],
+				"invoiceNumber":  va["invoice_number"],
+			})
+			s.db.Exec(ctx,
+				`UPDATE transactions SET doku_invoice_number=$1, doku_va_number=$2, payment_amount=$3 WHERE transaction_id=$4`,
+				va["invoice_number"], va["va_number"], totalIDR, txnId)
+			log.Printf("[SEAM Stage 1] VA created via ION — invoice=%s va=%s", va["invoice_number"], va["va_number"])
+		} else {
+			log.Printf("[BAP] ION create-va failed: %v", err)
+		}
+
+		if qr, err := s.callIONCreateQRIS(ionCtx, invoiceNumber, totalIDR); err == nil {
+			injectIntoConsiderationAttributes(payload, map[string]any{
+				"qrisString": qr,
+			})
+			s.db.Exec(ctx,
+				`UPDATE transactions SET doku_qris_string=$1 WHERE transaction_id=$2`,
+				qr, txnId)
+		} else {
+			log.Printf("[BAP] ION create-qris failed (non-fatal): %v", err)
+		}
+	}
+
+	// Persist snapshot and audit log (with enriched payload).
 	data, _ := json.Marshal(payload)
 	if txnId != "" {
 		s.saveSnapshot(ctx, txnId, onAction, data)
@@ -506,17 +555,209 @@ func (s *ClientService) HandleCallback(ctx context.Context, onAction string, pay
 		s.upsertTransaction(ctx, txnId, "init", "INIT_RECEIVED")
 	case "on_confirm":
 		s.upsertTransaction(ctx, txnId, "confirm", "CONFIRMED")
+		// SEAM Stage 4: auto-send reconcile after policy is issued.
+		policyState := extractPolicyStateFromOnConfirm(payload)
+		if policyState == "ACTIVE" {
+			go s.sendReconcile(context.Background(), txnId)
+		}
+	case "on_reconcile":
+		s.upsertTransaction(ctx, txnId, "reconcile", "SETTLED")
 	case "on_cancel":
 		s.upsertTransaction(ctx, txnId, "cancel", "CANCELLED")
-	// on_search, on_status, on_rate, on_support — no status change
+	// on_search, on_status, on_rate, on_support, on_reconcile — publish may fail gracefully
 	}
 
 	// Publish to unblock the waiting forwardAndWait call.
+	// on_reconcile has no waiting forwardAndWait (fire-and-forget), so publish error is expected.
 	if err := s.cb.Publish(ctx, route, txnId, msgId, data); err != nil {
-		// Not fatal — the frontend will time out gracefully.
-		log.Printf("[ClientService] Publish failed for onAction=%s txnId=%s: %v", onAction, txnId, err)
+		log.Printf("[ClientService] Publish for onAction=%s txnId=%s: %v", onAction, txnId, err)
 	}
 	return nil
+}
+
+// ---------------------------------------------------------------------------
+// ION service helpers
+// ---------------------------------------------------------------------------
+
+// callIONCreateVA calls the ION service to create a DOKU VA for the given invoice.
+func (s *ClientService) callIONCreateVA(ctx context.Context, invoiceNumber string, amountIDR int64) (map[string]any, error) {
+	if s.ionServiceURL == "" {
+		return nil, fmt.Errorf("ION_SERVICE_URL not configured")
+	}
+	body, _ := json.Marshal(map[string]any{
+		"invoice_number": invoiceNumber,
+		"customer_name":  "ION Insurance",
+		"amount_idr":     amountIDR,
+	})
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, s.ionServiceURL+"/payment/create-va", bytes.NewReader(body))
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	respBytes, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("ION create-va HTTP %d: %s", resp.StatusCode, string(respBytes))
+	}
+	var result map[string]any
+	json.Unmarshal(respBytes, &result)
+	return result, nil
+}
+
+// callIONCreateQRIS calls the ION service to create a DOKU QRIS code.
+// Returns the QR string content.
+func (s *ClientService) callIONCreateQRIS(ctx context.Context, invoiceNumber string, amountIDR int64) (string, error) {
+	if s.ionServiceURL == "" {
+		return "", fmt.Errorf("ION_SERVICE_URL not configured")
+	}
+	body, _ := json.Marshal(map[string]any{
+		"invoice_number": invoiceNumber,
+		"customer_name":  "ION Insurance",
+		"amount_idr":     amountIDR,
+	})
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, s.ionServiceURL+"/payment/create-qris", bytes.NewReader(body))
+	if err != nil {
+		return "", err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+	respBytes, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("ION create-qris HTTP %d: %s", resp.StatusCode, string(respBytes))
+	}
+	var result map[string]any
+	json.Unmarshal(respBytes, &result)
+	qr, _ := result["qr_string"].(string)
+	return qr, nil
+}
+
+// sendReconcile auto-sends a Beckn reconcile message to BPP after on_confirm.
+// Called asynchronously (go s.sendReconcile).
+func (s *ClientService) sendReconcile(ctx context.Context, txnId string) {
+	var invoiceNumber string
+	var amount int64
+	s.db.QueryRow(ctx,
+		`SELECT COALESCE(doku_invoice_number,''), COALESCE(payment_amount,0) FROM transactions WHERE transaction_id=$1`,
+		txnId,
+	).Scan(&invoiceNumber, &amount)
+
+	if invoiceNumber == "" {
+		invoiceNumber = "ins-" + txnId
+	}
+	if amount == 0 {
+		amount = s.getPaymentAmountFromSnapshot(ctx, txnId)
+	}
+
+	msgId := uuid.NewString()
+	payload := map[string]any{
+		"context": s.buildContext("reconcile", txnId, msgId),
+		"message": map[string]any{
+			"settlement": map[string]any{
+				"invoice_number": invoiceNumber,
+				"total_amount":   amount,
+				"splits": map[string]any{
+					"seller_pct":    97,
+					"buyer_app_pct": 3,
+				},
+			},
+		},
+	}
+	s.upsertTransaction(ctx, txnId, "reconcile", "RECONCILING")
+	// Onix does not support SEAM 'reconcile' — send directly to BPP webhook
+	if err := s.postDirect(s.bppWebhookURL+"/reconcile", payload); err != nil {
+		log.Printf("[BAP] sendReconcile failed: %v", err)
+	} else {
+		log.Printf("[SEAM Stage 4] Reconcile sent directly to BPP — invoice=%s amount=%d", invoiceNumber, amount)
+	}
+}
+
+func (s *ClientService) postDirect(url string, payload map[string]any) error {
+	body, _ := json.Marshal(payload)
+	resp, err := http.Post(url, "application/json", bytes.NewReader(body))
+	if err != nil {
+		return fmt.Errorf("POST %s: %w", url, err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode >= 400 {
+		respBody, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("POST %s HTTP %d: %s", url, resp.StatusCode, string(respBody))
+	}
+	return nil
+}
+
+// getPaymentAmountFromSnapshot extracts totalAmountIDR from the on_init contract_snapshot.
+func (s *ClientService) getPaymentAmountFromSnapshot(ctx context.Context, txnId string) int64 {
+	var snapshotData []byte
+	s.db.QueryRow(ctx,
+		`SELECT payload FROM contract_snapshots WHERE transaction_id=$1 AND on_action='on_init' ORDER BY received_at DESC LIMIT 1`,
+		txnId,
+	).Scan(&snapshotData)
+	if len(snapshotData) == 0 {
+		return 500_000
+	}
+	var snap map[string]any
+	json.Unmarshal(snapshotData, &snap)
+	return extractTotalIDRFromOnInit(snap)
+}
+
+// ---------------------------------------------------------------------------
+// Payload mutation helpers (for SEAM VA injection)
+// ---------------------------------------------------------------------------
+
+// extractTotalIDRFromOnInit reads totalAmountIDR from the on_init payload's considerationAttributes.
+func extractTotalIDRFromOnInit(payload map[string]any) int64 {
+	msg, _ := payload["message"].(map[string]any)
+	contract, _ := msg["contract"].(map[string]any)
+	commitments, _ := contract["commitments"].([]any)
+	if len(commitments) == 0 {
+		return 500_000
+	}
+	c, _ := commitments[0].(map[string]any)
+	ca, _ := c["considerationAttributes"].(map[string]any)
+	if total, ok := ca["totalAmountIDR"].(float64); ok {
+		return int64(total)
+	}
+	return 500_000
+}
+
+// injectIntoConsiderationAttributes merges extra fields into commitments[0].considerationAttributes.
+func injectIntoConsiderationAttributes(payload map[string]any, extra map[string]any) {
+	msg, _ := payload["message"].(map[string]any)
+	contract, _ := msg["contract"].(map[string]any)
+	commitments, _ := contract["commitments"].([]any)
+	if len(commitments) == 0 {
+		return
+	}
+	c, _ := commitments[0].(map[string]any)
+	ca, _ := c["considerationAttributes"].(map[string]any)
+	if ca == nil {
+		return
+	}
+	for k, v := range extra {
+		ca[k] = v
+	}
+}
+
+// extractPolicyStateFromOnConfirm reads policyState from the on_confirm payload's commitmentAttributes.
+func extractPolicyStateFromOnConfirm(payload map[string]any) string {
+	msg, _ := payload["message"].(map[string]any)
+	contract, _ := msg["contract"].(map[string]any)
+	commitments, _ := contract["commitments"].([]any)
+	if len(commitments) == 0 {
+		return ""
+	}
+	c, _ := commitments[0].(map[string]any)
+	ca, _ := c["commitmentAttributes"].(map[string]any)
+	state, _ := ca["policyState"].(string)
+	return state
 }
 
 // ListPolicies returns enriched confirmed policy data by joining on_confirm and on_select snapshots.

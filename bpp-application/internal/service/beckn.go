@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"os"
 	"regexp"
@@ -19,10 +20,11 @@ const ionSchemaBase = "https://raw.githubusercontent.com/remiges-Tushar/ion-spec
 var nikRegex = regexp.MustCompile(`^\d{16}$`)
 
 type BecknService struct {
-	db            *pgxpool.Pool
-	onixBPPCaller string
-	bppID         string
-	doku          *DokuService
+	db             *pgxpool.Pool
+	onixBPPCaller  string
+	bppID          string
+	ionServiceURL  string
+	bapWebhookURL  string
 }
 
 func NewBecknService(db *pgxpool.Pool) *BecknService {
@@ -34,7 +36,15 @@ func NewBecknService(db *pgxpool.Pool) *BecknService {
 	if bppID == "" {
 		bppID = "insurance-bpp.iontest"
 	}
-	return &BecknService{db: db, onixBPPCaller: url, bppID: bppID, doku: NewDokuService()}
+	ionURL := os.Getenv("ION_SERVICE_URL")
+	if ionURL == "" {
+		ionURL = "http://ion:8090"
+	}
+	bapURL := os.Getenv("BAP_WEBHOOK_URL")
+	if bapURL == "" {
+		bapURL = "http://bap:8083/webhook"
+	}
+	return &BecknService{db: db, onixBPPCaller: url, bppID: bppID, ionServiceURL: ionURL, bapWebhookURL: bapURL}
 }
 
 func (s *BecknService) logMessage(ctx context.Context, action, txnID string, payload map[string]any) {
@@ -267,40 +277,19 @@ func (s *BecknService) HandleInit(ctx context.Context, req map[string]any) error
 
 	var policyID int64
 	err := s.db.QueryRow(ctx,
-		`INSERT INTO policies (transaction_id, bap_id, bpp_id, status, policyholder_nik, vehicle_vin, idv)
-		 VALUES ($1,$2,$3,'PENDING_ISSUANCE',$4,$5,$6)
-		 ON CONFLICT (transaction_id) DO UPDATE SET status='PENDING_ISSUANCE'
+		`INSERT INTO policies (transaction_id, bap_id, bpp_id, status, policyholder_nik, vehicle_vin, idv, doku_invoice_number)
+		 VALUES ($1,$2,$3,'PENDING_ISSUANCE',$4,$5,$6,$7)
+		 ON CONFLICT (transaction_id) DO UPDATE SET status='PENDING_ISSUANCE', doku_invoice_number=EXCLUDED.doku_invoice_number
 		 RETURNING id`,
-		txnID, bapID, s.bppID, nik, vin, idvIDR,
+		txnID, bapID, s.bppID, nik, vin, idvIDR, "ins-"+txnID,
 	).Scan(&policyID)
 	if err != nil {
 		return fmt.Errorf("create policy: %w", err)
 	}
 
-	// Create DOKU VA with hold_settlement=true (SEAM Stage 2 — fund hold).
-	vaAccountNumber := fmt.Sprintf("8800%010d", policyID)
-	bankCode := "MOCK"
-	qrisString := ""
-	if s.doku != nil && s.doku.clientID != "" {
-		breakup, calcErr := CalcPremium("MOTOR_COMPREHENSIVE", "ZONE_3", idvIDR)
-		totalPremium := int64(500_000)
-		if calcErr == nil {
-			totalPremium = breakup.TotalIDR
-		} else if idvIDR > 0 {
-			totalPremium = idvIDR/30 + adminFeeIDR + stampDutyIDR
-		}
-
-		invoiceNumber := "ins-" + txnID
-		if va, verr := s.doku.CreateVirtualAccount(invoiceNumber, "ION Insurance", totalPremium); verr == nil {
-			s.db.Exec(ctx, `UPDATE policies SET doku_invoice_number=$1, doku_request_id=$2, doku_va_number=$3, bank_code=$4 WHERE id=$5`,
-				va.InvoiceNumber, va.RequestID, va.VANumber, va.BankCode, policyID)
-			vaAccountNumber = va.VANumber
-			bankCode = va.BankCode
-			fmt.Printf("[SEAM Stage 1] VA created — invoice=%s va=%s amount=%d hold_settlement=true\n", invoiceNumber, va.VANumber, totalPremium)
-		} else {
-			fmt.Printf("[SEAM] DOKU create VA failed: %v\n", verr)
-		}
-	}
+	// SEAM: VA creation moved to BAP (via ION service). BPP returns premium + settlementTerms.
+	// BAP injects VA/QRIS details into the on_init response before forwarding to frontend.
+	fmt.Printf("[SEAM Stage 1] Policy created — invoice=ins-%s policyID=%d (BAP will create VA via ION)\n", txnID, policyID)
 
 	response := map[string]any{
 		"context": s.buildResponseContext(ctxData, "on_init"),
@@ -328,9 +317,10 @@ func (s *BecknService) HandleInit(ctx context.Context, req map[string]any) error
 							"@type":          "PremiumConsideration",
 							"totalAmountIDR": initBreakup.TotalIDR,
 							"paymentStatus":  "PENDING",
-							"virtualAccount": vaAccountNumber,
-							"bankCode":       bankCode,
-							"qrisString":     qrisString,
+							"settlementTerms": map[string]any{
+								"sellerPct":   97,
+								"buyerAppPct": 3,
+							},
 							"breakup": []any{
 								map[string]any{"type": "BASE_PREMIUM", "amountIDR": initBreakup.BasePremiumIDR},
 								map[string]any{"type": "ADMIN_FEE", "amountIDR": initBreakup.AdminFeeIDR},
@@ -406,24 +396,13 @@ func (s *BecknService) HandleConfirm(ctx context.Context, req map[string]any) er
 			policyID,
 		).Scan(&paymentMethod, &paymentRef, &amountPaid)
 	} else {
-		// SEAM Stage 2→3: payment must have been received (hold set by DOKU webhook)
-		// before confirm triggers the settlement release.
+		// SEAM Stage 3: payment must have been received (hold set by DOKU → ION → BPP notification)
+		// before confirm triggers policy issuance. Settlement release happens at reconcile (Stage 5).
 		if !paymentReceived {
-			return fmt.Errorf("payment not yet received: simulate DOKU VA payment first (sandbox), or complete the bank transfer")
+			return fmt.Errorf("payment not yet received: complete the bank transfer or use DOKU sandbox")
 		}
 
-		// SEAM Stage 3: release held funds to settlement account(s).
-		fmt.Printf("[SEAM Stage 3] Confirm received — calling DOKU /finance/v1/release invoice=%s amount=%d\n",
-			dokuInvoiceNumber, confirmBreakup.TotalIDR)
-		if s.doku != nil && dokuInvoiceNumber != "" {
-			splits := buildSettlementSplits()
-			if rerr := s.doku.ReleaseSettlement(dokuInvoiceNumber, dokuRequestID, confirmBreakup.TotalIDR, splits); rerr != nil {
-				// Non-fatal in sandbox (bank account may not be configured); log and continue.
-				fmt.Printf("[SEAM Stage 3] Release call failed (non-fatal in sandbox — no bank account configured): %v\n", rerr)
-			} else {
-				fmt.Printf("[SEAM Stage 3] Release SUCCESS — funds disbursed, issuing policy\n")
-			}
-		}
+		fmt.Printf("[SEAM Stage 3] Confirm received — issuing policy (release deferred to reconcile) invoice=%s\n", dokuInvoiceNumber)
 
 		paymentMethod = "DOKU_VA"
 		paymentRef = dokuInvoiceNumber
@@ -505,20 +484,12 @@ func (s *BecknService) HandleConfirm(ctx context.Context, req map[string]any) er
 	return s.callOnixCaller("on_confirm", response)
 }
 
-// VerifyDokuWebhook validates the HMACSHA256 signature on an incoming DOKU webhook.
-func (s *BecknService) VerifyDokuWebhook(clientID, requestID, timestamp, requestTarget string, body []byte, signature string) bool {
-	if s.doku == nil {
-		return false
-	}
-	return s.doku.VerifyWebhookSignature(clientID, requestID, timestamp, requestTarget, body, signature)
-}
-
-// ProcessDokuPayment records that payment has been received and funds are held at DOKU.
+// HandlePaymentReceived records that payment has been received (called by ION service, not Beckn).
 // invoiceNumber format: "ins-{transactionID}".
-// Does NOT issue the policy — that happens only when confirm triggers ReleaseSettlement.
-func (s *BecknService) ProcessDokuPayment(ctx context.Context, invoiceNumber string, amount float64) error {
+// paymentRequestID is the Request-Id from the DOKU payment webhook (required for settlement release).
+func (s *BecknService) HandlePaymentReceived(ctx context.Context, invoiceNumber, paymentRequestID string, amount float64) error {
 	if !strings.HasPrefix(invoiceNumber, "ins-") {
-		return fmt.Errorf("unexpected DOKU invoice_number format: %s", invoiceNumber)
+		return fmt.Errorf("unexpected invoice_number format: %s", invoiceNumber)
 	}
 	txnID := strings.TrimPrefix(invoiceNumber, "ins-")
 
@@ -534,10 +505,17 @@ func (s *BecknService) ProcessDokuPayment(ctx context.Context, invoiceNumber str
 		return nil // idempotent
 	}
 
-	// SEAM Stage 2: mark funds as held — policy stays PENDING_ISSUANCE until confirm.
-	_, err = s.db.Exec(ctx,
-		`UPDATE policies SET payment_received=true WHERE transaction_id=$1`, txnID,
-	)
+	// SEAM Stage 2: funds held at DOKU — policy stays PENDING_ISSUANCE until confirm.
+	if paymentRequestID != "" {
+		_, err = s.db.Exec(ctx,
+			`UPDATE policies SET payment_received=true, doku_request_id=$2 WHERE transaction_id=$1`,
+			txnID, paymentRequestID,
+		)
+	} else {
+		_, err = s.db.Exec(ctx,
+			`UPDATE policies SET payment_received=true WHERE transaction_id=$1`, txnID,
+		)
+	}
 	if err != nil {
 		return fmt.Errorf("mark payment received: %w", err)
 	}
@@ -546,67 +524,161 @@ func (s *BecknService) ProcessDokuPayment(ctx context.Context, invoiceNumber str
 		`INSERT INTO payments (policy_id, method, payment_ref, amount_idr, paid_at) VALUES ($1,'DOKU_VA',$2,$3,NOW())`,
 		policyID, invoiceNumber, int64(amount),
 	)
-	fmt.Printf("[SEAM Stage 2] Payment received — invoice=%s amount=%.0f funds=HELD policy=PENDING_ISSUANCE (NOT yet issued)\n",
+	fmt.Printf("[SEAM Stage 2] Payment received — invoice=%s amount=%.0f funds=HELD policy=PENDING_ISSUANCE\n",
 		invoiceNumber, amount)
 	return nil
 }
 
-// SimulatePayment triggers a sandbox payment for testing by directly marking payment_received.
-func (s *BecknService) SimulatePayment(ctx context.Context, txnID, method string) error {
-	var dokuInvoiceNumber string
+// SimulatePayment — sandbox only: directly marks payment_received=true in DB.
+// Used when DOKU sandbox portal simulation is not available.
+func (s *BecknService) SimulatePayment(ctx context.Context, txnID string) error {
+	invoiceNumber := "ins-" + txnID
 	var idv int64
-	err := s.db.QueryRow(ctx,
-		`SELECT COALESCE(doku_invoice_number,''), COALESCE(idv,0)
-		 FROM policies WHERE transaction_id=$1`, txnID,
-	).Scan(&dokuInvoiceNumber, &idv)
-	if err != nil {
-		return fmt.Errorf("policy not found: %w", err)
-	}
+	s.db.QueryRow(ctx, `SELECT COALESCE(idv,0) FROM policies WHERE transaction_id=$1`, txnID).Scan(&idv)
 
-	breakup, calcErr := CalcPremium("MOTOR_COMPREHENSIVE", "ZONE_3", idv)
+	breakup, err := CalcPremium("MOTOR_COMPREHENSIVE", "ZONE_3", idv)
 	var amount float64 = 500_000
-	if calcErr == nil {
+	if err == nil {
 		amount = float64(breakup.TotalIDR)
 	}
-
-	if dokuInvoiceNumber == "" {
-		dokuInvoiceNumber = "ins-" + txnID
-	}
-
-	// Simulate DOKU webhook: set payment_received=true directly (sandbox only).
-	return s.ProcessDokuPayment(ctx, dokuInvoiceNumber, amount)
+	return s.HandlePaymentReceived(ctx, invoiceNumber, "", amount)
 }
 
-// buildSettlementSplits returns override_settlement entries from env config.
-func buildSettlementSplits() []DokuSplit {
-	bankAcctID := os.Getenv("DOKU_BPP_BANK_ACCOUNT_ID")
-	if bankAcctID == "" {
-		return nil
+// HandleReconcile processes the Beckn reconcile action from BAP.
+// Calls ION service to release held funds with split disbursements, then sends on_reconcile AGREED.
+func (s *BecknService) HandleReconcile(ctx context.Context, req map[string]any) error {
+	ctxData, _ := req["context"].(map[string]any)
+	txnID, _ := ctxData["transaction_id"].(string)
+	s.logMessage(ctx, "reconcile", txnID, req)
+
+	msg, _ := req["message"].(map[string]any)
+	settlement, _ := msg["settlement"].(map[string]any)
+	invoiceNumber, _ := settlement["invoice_number"].(string)
+	var totalAmount int64
+	if v, ok := settlement["total_amount"].(float64); ok {
+		totalAmount = int64(v)
 	}
-	return []DokuSplit{
-		{BankAccountSettlementID: bankAcctID, Value: 100.0, Type: "PERCENTAGE"},
+
+	if invoiceNumber == "" {
+		invoiceNumber = "ins-" + txnID
 	}
+
+	// Load doku_request_id (payment's Request-Id) needed for DOKU release.
+	var dokuRequestID string
+	var idv int64
+	s.db.QueryRow(ctx,
+		`SELECT COALESCE(doku_request_id,''), COALESCE(idv,0) FROM policies WHERE transaction_id=$1`, txnID,
+	).Scan(&dokuRequestID, &idv)
+
+	// Use IDV-based premium if total_amount not provided in reconcile message.
+	if totalAmount == 0 && idv > 0 {
+		if bp, err := CalcPremium("MOTOR_COMPREHENSIVE", "ZONE_3", idv); err == nil {
+			totalAmount = bp.TotalIDR
+		}
+	}
+
+	// Call ION service to execute the DOKU settlement release with splits.
+	bppBankAcctID := os.Getenv("DOKU_BPP_BANK_ACCOUNT_ID")
+	bapBankAcctID := os.Getenv("DOKU_BAP_BANK_ACCOUNT_ID")
+
+	splits := []map[string]any{}
+	if bppBankAcctID != "" {
+		splits = append(splits, map[string]any{
+			"bank_account_settlement_id": bppBankAcctID,
+			"value":                      97.0,
+			"type":                       "PERCENTAGE",
+		})
+	}
+	if bapBankAcctID != "" {
+		splits = append(splits, map[string]any{
+			"bank_account_settlement_id": bapBankAcctID,
+			"value":                      3.0,
+			"type":                       "PERCENTAGE",
+		})
+	}
+
+	fmt.Printf("[SEAM Stage 5] Calling ION release — invoice=%s originalReqID=%s amount=%d splits=%d\n",
+		invoiceNumber, dokuRequestID, totalAmount, len(splits))
+
+	releasePayload := map[string]any{
+		"invoice_number":      invoiceNumber,
+		"original_request_id": dokuRequestID,
+		"amount":              totalAmount,
+		"splits":              splits,
+	}
+	if rerr := s.callIONRelease(releasePayload); rerr != nil {
+		// Non-fatal in sandbox — log and continue so on_reconcile is still sent.
+		fmt.Printf("[SEAM Stage 5] ION release failed (non-fatal in sandbox): %v\n", rerr)
+	} else {
+		fmt.Printf("[SEAM Stage 5] ION release SUCCESS\n")
+	}
+
+	// Mark reconcile settled.
+	s.db.Exec(ctx, `UPDATE policies SET reconcile_status='SETTLED' WHERE transaction_id=$1`, txnID)
+
+	// Send on_reconcile AGREED.
+	response := map[string]any{
+		"context": s.buildResponseContext(ctxData, "on_reconcile"),
+		"message": map[string]any{
+			"settlement": map[string]any{
+				"status":         "AGREED",
+				"invoice_number": invoiceNumber,
+			},
+		},
+	}
+	fmt.Printf("[SEAM Stage 5] Sending on_reconcile AGREED directly to BAP — txn=%s\n", txnID)
+	return s.postDirect(s.bapWebhookURL+"/on_reconcile", response)
+}
+
+func (s *BecknService) postDirect(url string, payload map[string]any) error {
+	body, _ := json.Marshal(payload)
+	resp, err := http.Post(url, "application/json", bytes.NewBuffer(body))
+	if err != nil {
+		return fmt.Errorf("POST %s: %w", url, err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode >= 400 {
+		respBody, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("POST %s HTTP %d: %s", url, resp.StatusCode, string(respBody))
+	}
+	return nil
+}
+
+func (s *BecknService) callIONRelease(payload map[string]any) error {
+	body, _ := json.Marshal(payload)
+	resp, err := http.Post(s.ionServiceURL+"/settlement/release", "application/json", bytes.NewBuffer(body))
+	if err != nil {
+		return fmt.Errorf("call ION release: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		respBody, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("ION release HTTP %d: %s", resp.StatusCode, string(respBody))
+	}
+	return nil
 }
 
 // GetPaymentStatus returns SEAM-relevant payment state for a transaction (used by frontend polling).
 func (s *BecknService) GetPaymentStatus(ctx context.Context, txnID string) (map[string]any, error) {
-	var policyStatus string
+	var policyStatus, reconcileStatus string
 	var paymentReceived bool
 	var dokuInvoiceNumber, dokuVANumber string
 	var amountIDR int64
 	err := s.db.QueryRow(ctx,
-		`SELECT status::text, COALESCE(payment_received,false), COALESCE(doku_invoice_number,''), COALESCE(doku_va_number,''), COALESCE(idv,0)
+		`SELECT status::text, COALESCE(payment_received,false), COALESCE(doku_invoice_number,''), COALESCE(doku_va_number,''), COALESCE(idv,0), COALESCE(reconcile_status,'PENDING')
 		 FROM policies WHERE transaction_id=$1`, txnID,
-	).Scan(&policyStatus, &paymentReceived, &dokuInvoiceNumber, &dokuVANumber, &amountIDR)
+	).Scan(&policyStatus, &paymentReceived, &dokuInvoiceNumber, &dokuVANumber, &amountIDR, &reconcileStatus)
 	if err != nil {
 		return nil, fmt.Errorf("policy not found: %w", err)
 	}
 
-	seamStage := "Stage 1 — Order Created"
+	seamStage := "Stage 1 — VA Created (awaiting payment)"
 	if paymentReceived && policyStatus != "ACTIVE" {
 		seamStage = "Stage 2 — Funds Held at DOKU (awaiting confirm)"
-	} else if policyStatus == "ACTIVE" {
-		seamStage = "Stage 3 — Funds Released, Policy Active"
+	} else if policyStatus == "ACTIVE" && reconcileStatus != "SETTLED" {
+		seamStage = "Stage 3+4 — Policy Active (reconcile pending)"
+	} else if reconcileStatus == "SETTLED" {
+		seamStage = "Stage 5 — Settled (funds released with splits)"
 	}
 
 	return map[string]any{
@@ -615,6 +687,7 @@ func (s *BecknService) GetPaymentStatus(ctx context.Context, txnID string) (map[
 		"payment_received":    paymentReceived,
 		"doku_invoice_number": dokuInvoiceNumber,
 		"doku_va_number":      dokuVANumber,
+		"reconcile_status":    reconcileStatus,
 		"seam_stage":          seamStage,
 	}, nil
 }

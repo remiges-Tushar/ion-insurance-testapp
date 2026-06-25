@@ -12,3 +12,4 @@ routingRules:
       - rate
       - support
       - discover
+      - reconcile
