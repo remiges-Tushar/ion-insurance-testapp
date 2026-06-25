@@ -359,7 +359,7 @@ function PaymentStep({ initData, onNext, onBack, txnId, annualPremium }) {
     try {
       await api.post(`/webhook/simulate-payment?txn_id=${txnId}&method=${tab}`)
       // Fetch SEAM status to show the hold proof
-      const status = await api.get(`/api/v1/payment-status?txn_id=${txnId}`)
+      const status = await api.get(`/webhook/payment-status?txn_id=${txnId}`)
       setSeamStatus(status)
     } catch (err) {
       setError(err?.message || 'Simulation failed.')

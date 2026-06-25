@@ -32,7 +32,8 @@ func RegisterRoutes(r *gin.Engine, h *Handlers, authSvc *service.AuthService) {
 		wh.POST("/support", h.WebhookSupport)
 		wh.POST("/catalog/on_publish", h.WebhookOnPublish)
 		wh.POST("/doku", h.HandleDokuWebhook)
-		wh.POST("/simulate-payment", h.SimulatePayment) // sandbox testing only
+		wh.POST("/simulate-payment", h.SimulatePayment)  // sandbox testing only
+		wh.GET("/payment-status", h.GetPaymentStatus)
 	}
 
 	// Protected API routes
@@ -40,7 +41,6 @@ func RegisterRoutes(r *gin.Engine, h *Handlers, authSvc *service.AuthService) {
 	api.Use(AuthMiddleware(authSvc))
 	{
 		api.GET("/dashboard/stats", h.GetStats)
-		api.GET("/payment-status", h.GetPaymentStatus)
 
 		api.GET("/policies", h.ListPolicies)
 		api.GET("/policies/:id", h.GetPolicy)
