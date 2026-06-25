@@ -129,7 +129,7 @@ services:
       BPP_SERVER_PORT: "8080"
       BPP_JWT_SECRET: insurance-bpp-jwt-secret-change-in-production
       BPP_ONIX_BPP_CALLER_URL: http://onix-bpp:8082/bpp/caller
-      DOKU_CLIENT_ID: doku_key_sandbox_47daa946f4dd4352a07d1b95bceee096
+      DOKU_CLIENT_ID: BRN-0299-1782374867869
       DOKU_SECRET_KEY: SK-RZNjjFOg8s8i3FHIoB4m
       DOKU_BASE_URL: https://api-sandbox.doku.com
       DOKU_CALLBACK_URL: "https://boxy-hurt-smokeless.ngrok-free.dev/webhook/doku"

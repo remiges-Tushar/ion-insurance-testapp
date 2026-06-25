@@ -61,13 +61,16 @@ func (d *DokuService) sign(path string, bodyBytes []byte) (map[string]string, st
 	requestID := newRequestID()
 	timestamp := time.Now().UTC().Format("2006-01-02T15:04:05Z")
 
+	// DOKU requires "SHA-256=<base64>" format for the Digest field.
 	hash := sha256.Sum256(bodyBytes)
-	digest := base64.StdEncoding.EncodeToString(hash[:])
+	digest := "SHA-256=" + base64.StdEncoding.EncodeToString(hash[:])
 
 	stringToSign := fmt.Sprintf(
 		"Client-Id:%s\nRequest-Id:%s\nRequest-Timestamp:%s\nRequest-Target:%s\nDigest:%s",
 		d.clientID, requestID, timestamp, path, digest,
 	)
+
+	fmt.Printf("[DOKU sign] path=%s requestId=%s\nstringToSign=%q\n", path, requestID, stringToSign)
 
 	mac := hmac.New(sha256.New, []byte(d.secretKey))
 	mac.Write([]byte(stringToSign))
@@ -109,6 +112,7 @@ func (d *DokuService) doRequest(method, path string, body any) ([]byte, int, str
 	}
 	defer resp.Body.Close()
 	respBytes, err := io.ReadAll(resp.Body)
+	fmt.Printf("[DOKU response] %s %s → HTTP %d: %s\n", method, path, resp.StatusCode, string(respBytes))
 	return respBytes, resp.StatusCode, requestID, err
 }
 
