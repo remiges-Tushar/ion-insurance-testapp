@@ -6,6 +6,7 @@ import { motion, AnimatePresence } from 'framer-motion'
 import { Shield, CheckCircle, Download, Loader2, ArrowLeft, Wand2, Star, MessageCircle } from 'lucide-react'
 import { api } from '../api.js'
 import { fmtDate } from '../utils/date.js'
+import SeamStageBar from '../components/SeamStageBar.jsx'
 
 const DEMO_VEHICLE = {
   make: 'Toyota', model: 'Avanza', year: '2022',
@@ -533,28 +534,6 @@ function PaymentStep({ initData, onNext, onBack, txnId, annualPremium }) {
 }
 
 // Step 5: Policy Issued
-function SeamStageBar({ stage }) {
-  const stages = [
-    { key: 'va_created',     label: 'VA Created' },
-    { key: 'payment_held',   label: 'Payment Held' },
-    { key: 'policy_issued',  label: 'Policy Issued' },
-    { key: 'reconciling',    label: 'Reconciling' },
-    { key: 'settled',        label: 'Settled' },
-  ]
-  const activeIdx = stages.findIndex(s => s.key === stage)
-  return (
-    <div className="flex items-center gap-1 w-full">
-      {stages.map((s, i) => (
-        <div key={s.key} className="flex-1 flex flex-col items-center gap-1">
-          <div className={`h-1.5 w-full rounded-full ${i <= activeIdx ? 'bg-blue-500' : 'bg-gray-200'}`} />
-          <span className={`text-[9px] font-medium ${i === activeIdx ? 'text-blue-600' : i < activeIdx ? 'text-green-600' : 'text-slate-400'}`}>
-            {s.label}
-          </span>
-        </div>
-      ))}
-    </div>
-  )
-}
 
 function PolicyIssuedStep({ confirmData, txnId }) {
   const { t } = useTranslation()

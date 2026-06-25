@@ -31,6 +31,7 @@ func RegisterRoutes(r *gin.Engine, h *Handlers) {
 		api.POST("/rate", h.Rate)
 		api.POST("/support", h.Support)
 
+		api.GET("/orders", h.ListOrders)
 		api.GET("/policies", h.ListPolicies)
 		api.GET("/policies/:id", h.GetPolicy)
 	}

@@ -2,7 +2,7 @@ import React, { useState, useEffect } from 'react'
 import { useTranslation } from 'react-i18next'
 import {
   FileText, TrendingUp, DollarSign, AlertCircle,
-  Package, Tag, Headphones, Star
+  Package, Tag, Headphones, Star, Clock, CheckCircle, RefreshCw, Banknote
 } from 'lucide-react'
 import { motion } from 'framer-motion'
 import client from '../api/client.js'
@@ -130,6 +130,24 @@ export default function OverviewPage() {
         {statCards.map((card, i) => (
           <StatCard key={card.key} {...card} delay={i * 0.05} />
         ))}
+      </div>
+
+      {/* SEAM Pipeline section */}
+      <div className="mt-8">
+        <div className="mb-4">
+          <h2 className="text-lg font-bold text-slate-900">SEAM Pipeline</h2>
+          <p className="text-slate-500 text-xs mt-0.5">Settlement Assurance & Escrow Mechanism — live counters</p>
+        </div>
+        <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
+          {[
+            { label: 'Awaiting Payment', value: stats?.seam_payment_pending   ?? '—', icon: Clock,        color: 'bg-amber-400' },
+            { label: 'Payment Received', value: stats?.seam_payment_received  ?? '—', icon: CheckCircle,  color: 'bg-blue-500' },
+            { label: 'Reconcile Pending', value: stats?.seam_reconcile_pending ?? '—', icon: RefreshCw,   color: 'bg-violet-500' },
+            { label: 'Fully Settled',    value: stats?.seam_reconcile_settled ?? '—', icon: Banknote,     color: 'bg-emerald-500' },
+          ].map((card, i) => (
+            <StatCard key={card.label} {...card} delay={0.4 + i * 0.05} />
+          ))}
+        </div>
       </div>
     </div>
   )

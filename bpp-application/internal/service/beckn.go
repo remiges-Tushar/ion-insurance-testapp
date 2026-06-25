@@ -898,25 +898,31 @@ func (s *BecknService) buildResponseContext(reqCtx map[string]any, action string
 // Dashboard / list methods
 
 type PolicyRow struct {
-	ID              int64      `json:"id"`
-	TransactionID   string     `json:"transaction_id"`
-	BapID           string     `json:"bap_id"`
-	Status          string     `json:"status"`
-	PolicyholderNIK string     `json:"policyholder_nik"`
-	VehicleVIN      string     `json:"vehicle_vin"`
-	IDV             int64      `json:"idv"`
-	PolicyNumber    string     `json:"policy_number"`
-	CertificateURL  string     `json:"certificate_url"`
-	CoverageStart   *time.Time `json:"coverage_start"`
-	CoverageEnd     *time.Time `json:"coverage_end"`
-	CreatedAt       time.Time  `json:"created_at"`
+	ID                int64      `json:"id"`
+	TransactionID     string     `json:"transaction_id"`
+	BapID             string     `json:"bap_id"`
+	Status            string     `json:"status"`
+	PolicyholderNIK   string     `json:"policyholder_nik"`
+	VehicleVIN        string     `json:"vehicle_vin"`
+	IDV               int64      `json:"idv"`
+	PolicyNumber      string     `json:"policy_number"`
+	CertificateURL    string     `json:"certificate_url"`
+	CoverageStart     *time.Time `json:"coverage_start"`
+	CoverageEnd       *time.Time `json:"coverage_end"`
+	CreatedAt         time.Time  `json:"created_at"`
+	PaymentReceived   bool       `json:"payment_received"`
+	DokuInvoiceNumber string     `json:"doku_invoice_number"`
+	DokuVANumber      string     `json:"doku_va_number"`
+	ReconcileStatus   string     `json:"reconcile_status"`
 }
 
 func (s *BecknService) ListPolicies(ctx context.Context) ([]PolicyRow, error) {
 	rows, err := s.db.Query(ctx,
 		`SELECT id, transaction_id, bap_id, status::text, COALESCE(policyholder_nik,''), COALESCE(vehicle_vin,''),
 		        COALESCE(idv,0), COALESCE(policy_number,''), COALESCE(certificate_url,''),
-		        coverage_start, coverage_end, created_at
+		        coverage_start, coverage_end, created_at,
+		        COALESCE(payment_received,false), COALESCE(doku_invoice_number,''),
+		        COALESCE(doku_va_number,''), COALESCE(reconcile_status,'PENDING')
 		 FROM policies ORDER BY created_at DESC`)
 	if err != nil {
 		return nil, err
@@ -927,7 +933,8 @@ func (s *BecknService) ListPolicies(ctx context.Context) ([]PolicyRow, error) {
 		var p PolicyRow
 		if err := rows.Scan(&p.ID, &p.TransactionID, &p.BapID, &p.Status, &p.PolicyholderNIK,
 			&p.VehicleVIN, &p.IDV, &p.PolicyNumber, &p.CertificateURL,
-			&p.CoverageStart, &p.CoverageEnd, &p.CreatedAt); err != nil {
+			&p.CoverageStart, &p.CoverageEnd, &p.CreatedAt,
+			&p.PaymentReceived, &p.DokuInvoiceNumber, &p.DokuVANumber, &p.ReconcileStatus); err != nil {
 			return nil, err
 		}
 		results = append(results, p)
@@ -940,11 +947,14 @@ func (s *BecknService) GetPolicy(ctx context.Context, id int64) (*PolicyRow, err
 	err := s.db.QueryRow(ctx,
 		`SELECT id, transaction_id, bap_id, status::text, COALESCE(policyholder_nik,''), COALESCE(vehicle_vin,''),
 		        COALESCE(idv,0), COALESCE(policy_number,''), COALESCE(certificate_url,''),
-		        coverage_start, coverage_end, created_at
+		        coverage_start, coverage_end, created_at,
+		        COALESCE(payment_received,false), COALESCE(doku_invoice_number,''),
+		        COALESCE(doku_va_number,''), COALESCE(reconcile_status,'PENDING')
 		 FROM policies WHERE id=$1`, id,
 	).Scan(&p.ID, &p.TransactionID, &p.BapID, &p.Status, &p.PolicyholderNIK,
 		&p.VehicleVIN, &p.IDV, &p.PolicyNumber, &p.CertificateURL,
-		&p.CoverageStart, &p.CoverageEnd, &p.CreatedAt)
+		&p.CoverageStart, &p.CoverageEnd, &p.CreatedAt,
+		&p.PaymentReceived, &p.DokuInvoiceNumber, &p.DokuVANumber, &p.ReconcileStatus)
 	if err != nil {
 		return nil, err
 	}
@@ -954,6 +964,7 @@ func (s *BecknService) GetPolicy(ctx context.Context, id int64) (*PolicyRow, err
 func (s *BecknService) GetDashboardStats(ctx context.Context) (map[string]any, error) {
 	var activePolicies, policiesIssued, premiumsCollected, claimsFiled, claimsPending, supportTickets, renewals int64
 	var avgPremium float64
+	var paymentPending, paymentReceived, reconcileSettled, reconcilePending int64
 
 	s.db.QueryRow(ctx, `SELECT COUNT(*) FROM policies WHERE status='ACTIVE'`).Scan(&activePolicies)
 	s.db.QueryRow(ctx, `SELECT COUNT(*) FROM policies`).Scan(&policiesIssued)
@@ -965,16 +976,24 @@ func (s *BecknService) GetDashboardStats(ctx context.Context) (map[string]any, e
 	s.db.QueryRow(ctx,
 		`SELECT COUNT(*) FROM policies WHERE status='ACTIVE' AND coverage_end BETWEEN NOW() AND NOW() + INTERVAL '30 days'`,
 	).Scan(&renewals)
+	s.db.QueryRow(ctx, `SELECT COUNT(*) FROM policies WHERE COALESCE(payment_received,false)=false AND status='PENDING_ISSUANCE'`).Scan(&paymentPending)
+	s.db.QueryRow(ctx, `SELECT COUNT(*) FROM policies WHERE COALESCE(payment_received,false)=true`).Scan(&paymentReceived)
+	s.db.QueryRow(ctx, `SELECT COUNT(*) FROM policies WHERE COALESCE(reconcile_status,'PENDING')='SETTLED'`).Scan(&reconcileSettled)
+	s.db.QueryRow(ctx, `SELECT COUNT(*) FROM policies WHERE COALESCE(reconcile_status,'PENDING')!='SETTLED' AND status='ACTIVE'`).Scan(&reconcilePending)
 
 	return map[string]any{
-		"active_policies":      activePolicies,
-		"policies_issued":      policiesIssued,
+		"active_policies":        activePolicies,
+		"policies_issued":        policiesIssued,
 		"premiums_collected_idr": premiumsCollected,
-		"avg_premium_idr":      int64(avgPremium),
-		"claims_filed":         claimsFiled,
-		"claims_pending":       claimsPending,
-		"support_tickets":      supportTickets,
-		"renewals_next_30_days": renewals,
+		"avg_premium_idr":        int64(avgPremium),
+		"claims_filed":           claimsFiled,
+		"claims_pending":         claimsPending,
+		"support_tickets":        supportTickets,
+		"renewals_next_30_days":  renewals,
+		"seam_payment_pending":   paymentPending,
+		"seam_payment_received":  paymentReceived,
+		"seam_reconcile_settled": reconcileSettled,
+		"seam_reconcile_pending": reconcilePending,
 	}, nil
 }
 

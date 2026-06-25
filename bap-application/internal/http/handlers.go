@@ -192,6 +192,17 @@ func (h *Handlers) Support(c *gin.Context) {
 	c.JSON(http.StatusOK, result)
 }
 
+// ListOrders handles GET /api/v1/orders
+// Returns all transactions with SEAM stage info.
+func (h *Handlers) ListOrders(c *gin.Context) {
+	orders, err := h.svc.ListOrders(c.Request.Context())
+	if err != nil {
+		writeProblem(c, http.StatusInternalServerError, "Internal Error", err.Error())
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"orders": orders})
+}
+
 // ListPolicies handles GET /api/v1/policies
 // Returns all confirmed policy snapshots from the DB.
 func (h *Handlers) ListPolicies(c *gin.Context) {

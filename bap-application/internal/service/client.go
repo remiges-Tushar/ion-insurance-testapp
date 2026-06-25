@@ -886,6 +886,75 @@ func (s *ClientService) GetPolicyByTxn(ctx context.Context, txnId string) (map[s
 	}, nil
 }
 
+// ListOrders returns all transactions with SEAM stage info, joining the latest snapshot.
+func (s *ClientService) ListOrders(ctx context.Context) ([]map[string]any, error) {
+	rows, err := s.db.Query(ctx,
+		`SELECT t.transaction_id, t.action, t.status, t.created_at,
+		        COALESCE(t.doku_invoice_number,''), COALESCE(t.doku_va_number,''),
+		        COALESCE(t.payment_amount,0),
+		        COALESCE(cs.on_action,''), COALESCE(cs.received_at, t.created_at)
+		 FROM transactions t
+		 LEFT JOIN LATERAL (
+		     SELECT on_action, received_at FROM contract_snapshots
+		     WHERE transaction_id = t.transaction_id
+		     ORDER BY received_at DESC LIMIT 1
+		 ) cs ON true
+		 ORDER BY t.created_at DESC`,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var orders []map[string]any
+	for rows.Next() {
+		var txnId, action, status, invoiceNum, vaNum, latestOnAction string
+		var createdAt, latestAt time.Time
+		var amount int64
+		if err := rows.Scan(&txnId, &action, &status, &createdAt,
+			&invoiceNum, &vaNum, &amount, &latestOnAction, &latestAt); err != nil {
+			continue
+		}
+		seamStage := seamStageFromStatus(status, latestOnAction)
+		orders = append(orders, map[string]any{
+			"transaction_id":      txnId,
+			"action":              action,
+			"status":              status,
+			"created_at":          createdAt,
+			"doku_invoice_number": invoiceNum,
+			"doku_va_number":      vaNum,
+			"payment_amount":      amount,
+			"latest_on_action":    latestOnAction,
+			"last_updated":        latestAt,
+			"seam_stage":          seamStage,
+		})
+	}
+	if orders == nil {
+		orders = []map[string]any{}
+	}
+	return orders, rows.Err()
+}
+
+func seamStageFromStatus(status, latestOnAction string) string {
+	switch status {
+	case "SETTLED":
+		return "settled"
+	case "RECONCILING":
+		return "reconciling"
+	case "CONFIRMED":
+		return "policy_issued"
+	case "INIT_RECEIVED":
+		return "va_created"
+	}
+	if latestOnAction == "on_confirm" {
+		return "policy_issued"
+	}
+	if latestOnAction == "on_init" {
+		return "va_created"
+	}
+	return "va_created"
+}
+
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
