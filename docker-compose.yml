@@ -132,6 +132,7 @@ services:
       DOKU_CLIENT_ID: doku_key_sandbox_47daa946f4dd4352a07d1b95bceee096
       DOKU_SECRET_KEY: SK-RZNjjFOg8s8i3FHIoB4m
       DOKU_BASE_URL: https://api-sandbox.doku.com
+      DOKU_CALLBACK_URL: ""
       DOKU_BPP_BANK_ACCOUNT_ID: ""
     depends_on:
       migrate-bpp:

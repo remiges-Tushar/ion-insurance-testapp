@@ -114,12 +114,15 @@ func (d *DokuService) doRequest(method, path string, body any) ([]byte, int, str
 
 // CreateVirtualAccount creates a DOKU BNI VA with hold_settlement=true (SEAM fund hold).
 func (d *DokuService) CreateVirtualAccount(invoiceNumber, customerName string, amount int64) (*DokuVA, error) {
+	callbackURL := os.Getenv("DOKU_CALLBACK_URL") // e.g. https://<ngrok>/webhook/doku
+
 	payload := map[string]any{
 		"client": map[string]any{"id": d.clientID},
 		"order": map[string]any{
 			"invoice_number": invoiceNumber,
 			"amount":         amount,
 			"currency":       "IDR",
+			"callback_url":   callbackURL,
 		},
 		"virtual_account_info": map[string]any{
 			"billing_type":    "FIX_BILL",
