@@ -454,27 +454,43 @@ function PaymentStep({ initData, onNext, onBack, txnId, annualPremium }) {
         </div>
 
         {/* Settlement breakdown */}
-        <div className="bg-slate-50 rounded-xl p-4 border border-slate-100">
-          <p className="text-xs font-semibold text-slate-500 uppercase tracking-wide mb-3">Settlement Distribution</p>
-          <div className="space-y-2">
-            {[
-              { label: 'BPP (Insurer)',    pct: settlementTerms.sellerPct   ?? 97, color: 'bg-blue-500',    text: 'text-blue-700'    },
-              { label: 'BAP (Buyer App)',  pct: settlementTerms.buyerAppPct ?? 2,  color: 'bg-violet-500',  text: 'text-violet-700'  },
-              { label: 'ION (Network Fee)',pct: settlementTerms.ionFeePct   ?? 1,  color: 'bg-amber-500',   text: 'text-amber-700'   },
-            ].map(({ label, pct, color, text }) => (
-              <div key={label}>
-                <div className="flex justify-between text-xs mb-1">
-                  <span className="text-slate-600">{label}</span>
-                  <span className={`font-bold ${text}`}>{pct}%</span>
-                </div>
-                <div className="h-2 bg-slate-200 rounded-full overflow-hidden">
-                  <div className={`h-full rounded-full ${color}`} style={{ width: `${pct}%` }} />
-                </div>
+        {(() => {
+          const splits = [
+            { label: 'BPP (Insurer)',     pct: settlementTerms.sellerPct   ?? 97, color: 'bg-blue-500',   text: 'text-blue-700'   },
+            { label: 'BAP (Buyer App)',   pct: settlementTerms.buyerAppPct ?? 2,  color: 'bg-violet-500', text: 'text-violet-700' },
+            { label: 'ION (Network Fee)', pct: settlementTerms.ionFeePct   ?? 1,  color: 'bg-amber-500',  text: 'text-amber-700'  },
+          ]
+          const total = splits.reduce((s, r) => s + Math.round(totalPremium * r.pct / 100), 0)
+          return (
+            <div className="bg-slate-50 rounded-xl p-4 border border-slate-100">
+              <p className="text-xs font-semibold text-slate-500 uppercase tracking-wide mb-3">Settlement Distribution</p>
+              <div className="space-y-3">
+                {splits.map(({ label, pct, color, text }) => {
+                  const amt = Math.round(totalPremium * pct / 100)
+                  return (
+                    <div key={label}>
+                      <div className="flex justify-between text-xs mb-1">
+                        <span className="text-slate-600">{label}</span>
+                        <span className="flex items-center gap-2">
+                          <span className="text-slate-400 font-mono">IDR {amt.toLocaleString('id-ID')}</span>
+                          <span className={`font-bold ${text} w-8 text-right`}>{pct}%</span>
+                        </span>
+                      </div>
+                      <div className="h-2 bg-slate-200 rounded-full overflow-hidden">
+                        <div className={`h-full rounded-full ${color}`} style={{ width: `${pct}%` }} />
+                      </div>
+                    </div>
+                  )
+                })}
               </div>
-            ))}
-          </div>
-          <p className="text-[10px] text-slate-400 mt-3">Funds are held by DOKU and released on settlement confirmation.</p>
-        </div>
+              <div className="mt-3 pt-3 border-t border-slate-200 flex justify-between text-xs">
+                <span className="font-semibold text-slate-600">Total</span>
+                <span className="font-bold text-slate-900 font-mono">IDR {total.toLocaleString('id-ID')}</span>
+              </div>
+              <p className="text-[10px] text-slate-400 mt-1">Funds held by DOKU, released on settlement confirmation.</p>
+            </div>
+          )
+        })()}
 
         {/* Payment method tabs */}
         <div className="flex rounded-lg border border-gray-200 overflow-hidden">
