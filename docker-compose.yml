@@ -155,6 +155,7 @@ services:
       ION_SERVICE_URL: "http://ion:8090"
       DOKU_BPP_BANK_ACCOUNT_ID: BNK-0002-1782383276041
       DOKU_BAP_BANK_ACCOUNT_ID: BNK-0001-1782383221155
+      DOKU_ION_BANK_ACCOUNT_ID: BNK-0003-1782383300000
     depends_on:
       migrate-bpp:
         condition: service_completed_successfully

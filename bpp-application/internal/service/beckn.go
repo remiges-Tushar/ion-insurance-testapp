@@ -319,7 +319,8 @@ func (s *BecknService) HandleInit(ctx context.Context, req map[string]any) error
 							"paymentStatus":  "PENDING",
 							"settlementTerms": map[string]any{
 								"sellerPct":   97,
-								"buyerAppPct": 3,
+								"buyerAppPct": 2,
+								"ionFeePct":   1,
 							},
 							"breakup": []any{
 								map[string]any{"type": "BASE_PREMIUM", "amountIDR": initBreakup.BasePremiumIDR},
@@ -578,8 +579,10 @@ func (s *BecknService) HandleReconcile(ctx context.Context, req map[string]any) 
 	}
 
 	// Call ION service to execute the DOKU settlement release with splits.
+	// Split: BPP (insurer) 97% + BAP (buyer app) 2% + ION (network fee) 1% = 100%
 	bppBankAcctID := os.Getenv("DOKU_BPP_BANK_ACCOUNT_ID")
 	bapBankAcctID := os.Getenv("DOKU_BAP_BANK_ACCOUNT_ID")
+	ionBankAcctID := os.Getenv("DOKU_ION_BANK_ACCOUNT_ID")
 
 	splits := []map[string]any{}
 	if bppBankAcctID != "" {
@@ -592,7 +595,14 @@ func (s *BecknService) HandleReconcile(ctx context.Context, req map[string]any) 
 	if bapBankAcctID != "" {
 		splits = append(splits, map[string]any{
 			"bank_account_settlement_id": bapBankAcctID,
-			"value":                      3.0,
+			"value":                      2.0,
+			"type":                       "PERCENTAGE",
+		})
+	}
+	if ionBankAcctID != "" {
+		splits = append(splits, map[string]any{
+			"bank_account_settlement_id": ionBankAcctID,
+			"value":                      1.0,
 			"type":                       "PERCENTAGE",
 		})
 	}
@@ -616,13 +626,18 @@ func (s *BecknService) HandleReconcile(ctx context.Context, req map[string]any) 
 	// Mark reconcile settled.
 	s.db.Exec(ctx, `UPDATE policies SET reconcile_status='SETTLED' WHERE transaction_id=$1`, txnID)
 
-	// Send on_reconcile AGREED.
+	// Send on_reconcile AGREED with split breakdown.
 	response := map[string]any{
 		"context": s.buildResponseContext(ctxData, "on_reconcile"),
 		"message": map[string]any{
 			"settlement": map[string]any{
 				"status":         "AGREED",
 				"invoice_number": invoiceNumber,
+				"splits": []map[string]any{
+					{"party": "seller", "label": "BPP (Insurer)", "value": 97.0, "type": "PERCENTAGE"},
+					{"party": "buyer_app", "label": "BAP (Buyer App)", "value": 2.0, "type": "PERCENTAGE"},
+					{"party": "ion", "label": "ION (Network Fee)", "value": 1.0, "type": "PERCENTAGE"},
+				},
 			},
 		},
 	}

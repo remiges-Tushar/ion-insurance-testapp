@@ -138,6 +138,33 @@ function OrderDetailPanel({ order, onClose }) {
             </div>
           </div>
 
+          {/* Settlement distribution */}
+          <div className="bg-slate-50 rounded-xl p-4 space-y-3">
+            <p className="text-xs font-semibold text-slate-500 uppercase tracking-wide flex items-center gap-1.5">
+              <Banknote size={11} /> Settlement Distribution
+            </p>
+            {[
+              { label: 'BPP (Insurer)',     pct: 97, color: 'bg-blue-500',   text: 'text-blue-700'   },
+              { label: 'BAP (Buyer App)',   pct: 2,  color: 'bg-violet-500', text: 'text-violet-700' },
+              { label: 'ION (Network Fee)', pct: 1,  color: 'bg-amber-500',  text: 'text-amber-700'  },
+            ].map(({ label, pct, color, text }) => (
+              <div key={label}>
+                <div className="flex justify-between text-xs mb-1">
+                  <span className="text-slate-600">{label}</span>
+                  <span className={`font-bold ${text}`}>{pct}%
+                    {order.payment_amount > 0 && (
+                      <span className="font-normal text-slate-400 ml-1">({fmtIDR(Math.round(order.payment_amount * pct / 100))})</span>
+                    )}
+                  </span>
+                </div>
+                <div className="h-2 bg-slate-200 rounded-full overflow-hidden">
+                  <div className={`h-full rounded-full ${color}`} style={{ width: `${pct}%` }} />
+                </div>
+              </div>
+            ))}
+            <p className="text-[10px] text-slate-400">Released on SETTLED confirmation via ION → DOKU.</p>
+          </div>
+
           {/* Timestamps */}
           <div className="space-y-2">
             <div className="flex justify-between">

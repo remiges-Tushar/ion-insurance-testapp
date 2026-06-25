@@ -354,6 +354,7 @@ function PaymentStep({ initData, onNext, onBack, txnId, annualPremium }) {
   const bankCode = considerationAttrs.bankCode || commitmentAttrs.bankCode || ''
   const qrisString = considerationAttrs.qrisString || ''
   const howToPayPage = considerationAttrs.howToPayPage || ''
+  const settlementTerms = considerationAttrs.settlementTerms || { sellerPct: 97, buyerAppPct: 2, ionFeePct: 1 }
 
   // Auto-poll BPP payment status every 3s until payment received
   useEffect(() => {
@@ -445,9 +446,34 @@ function PaymentStep({ initData, onNext, onBack, txnId, annualPremium }) {
       )}
 
       <div className="bg-white border border-gray-100 rounded-xl p-6 shadow-sm mb-6 space-y-4">
-        <div>
-          <p className="text-sm text-slate-500 mb-1">{t('payment.total')}</p>
-          <p className="text-3xl font-bold text-slate-900">IDR {Number(totalPremium).toLocaleString()}</p>
+        <div className="flex items-end justify-between">
+          <div>
+            <p className="text-sm text-slate-500 mb-1">{t('payment.total')}</p>
+            <p className="text-3xl font-bold text-slate-900">IDR {Number(totalPremium).toLocaleString()}</p>
+          </div>
+        </div>
+
+        {/* Settlement breakdown */}
+        <div className="bg-slate-50 rounded-xl p-4 border border-slate-100">
+          <p className="text-xs font-semibold text-slate-500 uppercase tracking-wide mb-3">Settlement Distribution</p>
+          <div className="space-y-2">
+            {[
+              { label: 'BPP (Insurer)',    pct: settlementTerms.sellerPct   ?? 97, color: 'bg-blue-500',    text: 'text-blue-700'    },
+              { label: 'BAP (Buyer App)',  pct: settlementTerms.buyerAppPct ?? 2,  color: 'bg-violet-500',  text: 'text-violet-700'  },
+              { label: 'ION (Network Fee)',pct: settlementTerms.ionFeePct   ?? 1,  color: 'bg-amber-500',   text: 'text-amber-700'   },
+            ].map(({ label, pct, color, text }) => (
+              <div key={label}>
+                <div className="flex justify-between text-xs mb-1">
+                  <span className="text-slate-600">{label}</span>
+                  <span className={`font-bold ${text}`}>{pct}%</span>
+                </div>
+                <div className="h-2 bg-slate-200 rounded-full overflow-hidden">
+                  <div className={`h-full rounded-full ${color}`} style={{ width: `${pct}%` }} />
+                </div>
+              </div>
+            ))}
+          </div>
+          <p className="text-[10px] text-slate-400 mt-3">Funds are held by DOKU and released on settlement confirmation.</p>
         </div>
 
         {/* Payment method tabs */}

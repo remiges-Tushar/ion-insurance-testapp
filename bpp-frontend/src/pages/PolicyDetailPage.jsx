@@ -180,6 +180,29 @@ export default function PolicyDetailPage() {
               </span>
             } />
           </dl>
+
+          {/* Settlement split breakdown */}
+          <div className="mt-5 pt-4 border-t border-slate-100">
+            <p className="text-xs font-semibold text-slate-500 uppercase tracking-wide mb-3">Settlement Distribution</p>
+            <div className="space-y-2.5">
+              {[
+                { label: 'BPP (Insurer)',     pct: 97, color: 'bg-blue-500',   text: 'text-blue-700',   amount: policy.idv ? Math.round(policy.idv * 0.97) : null },
+                { label: 'BAP (Buyer App)',   pct: 2,  color: 'bg-violet-500', text: 'text-violet-700', amount: policy.idv ? Math.round(policy.idv * 0.02) : null },
+                { label: 'ION (Network Fee)', pct: 1,  color: 'bg-amber-500',  text: 'text-amber-700',  amount: policy.idv ? Math.round(policy.idv * 0.01) : null },
+              ].map(({ label, pct, color, text }) => (
+                <div key={label}>
+                  <div className="flex justify-between text-xs mb-1">
+                    <span className="text-slate-600">{label}</span>
+                    <span className={`font-bold ${text}`}>{pct}%</span>
+                  </div>
+                  <div className="h-2 bg-slate-200 rounded-full overflow-hidden">
+                    <div className={`h-full rounded-full ${color}`} style={{ width: `${pct}%` }} />
+                  </div>
+                </div>
+              ))}
+            </div>
+            <p className="text-[10px] text-slate-400 mt-2">Released via ION → DOKU on reconcile completion.</p>
+          </div>
         </motion.div>
       </div>
     </div>
