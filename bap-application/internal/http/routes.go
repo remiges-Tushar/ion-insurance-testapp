@@ -34,6 +34,8 @@ func RegisterRoutes(r *gin.Engine, h *Handlers) {
 		api.GET("/orders", h.ListOrders)
 		api.GET("/policies", h.ListPolicies)
 		api.GET("/policies/:id", h.GetPolicy)
+
+		api.POST("/payment-received", h.PaymentReceived)
 	}
 
 	// Beckn callback webhooks (called by onix-bap when BPP responds)

@@ -1,6 +1,6 @@
 import React, { useState, useRef, useEffect } from 'react'
 import QRCode from 'qrcode'
-import { useLocation, useNavigate } from 'react-router-dom'
+import { useLocation, useNavigate, useParams, useSearchParams } from 'react-router-dom'
 import { useTranslation } from 'react-i18next'
 import { motion, AnimatePresence } from 'framer-motion'
 import { Shield, CheckCircle, Download, Loader2, ArrowLeft, Wand2, Star, MessageCircle } from 'lucide-react'
@@ -337,24 +337,25 @@ function QRCanvas({ qrString }) {
 }
 
 // Step 4: Payment
-function PaymentStep({ initData, onNext, onBack, txnId, annualPremium }) {
+function PaymentStep({ initData, onNext, onBack, txnId, annualPremium, paymentDone }) {
   const { t } = useTranslation()
   const [loading, setLoading] = useState(false)
-  const [simulating, setSimulating] = useState(false)
   const [seamStatus, setSeamStatus] = useState(null)
   const [error, setError] = useState('')
-  const [tab, setTab] = useState('VA')
   const submitting = useRef(false)
 
-  // VA/QRIS details injected by BAP from ION service into considerationAttributes
+  // Checkout URL injected by BAP from ION service into considerationAttributes
   const considerationAttrs = initData?.message?.contract?.commitments?.[0]?.considerationAttributes || {}
   const commitmentAttrs = initData?.message?.contract?.commitments?.[0]?.commitmentAttributes || {}
   const totalPremium = considerationAttrs.totalAmountIDR || annualPremium || 0
-  const virtualAccount = considerationAttrs.virtualAccount || commitmentAttrs.virtualAccount || '—'
-  const bankCode = considerationAttrs.bankCode || commitmentAttrs.bankCode || ''
-  const qrisString = considerationAttrs.qrisString || ''
-  const howToPayPage = considerationAttrs.howToPayPage || ''
+  const checkoutUrl = considerationAttrs.checkoutUrl || ''
   const settlementTerms = considerationAttrs.settlementTerms || { sellerPct: 97, buyerAppPct: 2, ionFeePct: 1 }
+
+  // Immediate poll when arriving back from DOKU checkout redirect
+  useEffect(() => {
+    if (!txnId || !paymentDone) return
+    api.get(`/webhook/payment-status?txn_id=${txnId}`).then(setSeamStatus).catch(() => {})
+  }, [txnId, paymentDone])
 
   // Auto-poll BPP payment status every 3s until payment received
   useEffect(() => {
@@ -368,37 +369,16 @@ function PaymentStep({ initData, onNext, onBack, txnId, annualPremium }) {
     return () => clearInterval(interval)
   }, [txnId, seamStatus?.payment_received])
 
-  async function handleSimulate() {
-    setSimulating(true)
-    setError('')
-    try {
-      const invoiceNumber = seamStatus?.doku_invoice_number || `ins-${txnId}`
-      // ION signs a DOKU-format webhook and fires it to ngrok → nginx → ION → BPP
-      await api.post('/ion/payment/simulate', {
-        invoice_number: invoiceNumber,
-        amount: Number(totalPremium),
-      })
-      // Poll once immediately after simulate
-      const status = await api.get(`/webhook/payment-status?txn_id=${txnId}`)
-      setSeamStatus(status)
-    } catch (err) {
-      setError(err?.message || 'Simulation failed.')
-    } finally {
-      setSimulating(false)
-    }
-  }
-
   async function handlePaid() {
     if (submitting.current) return
     submitting.current = true
     setLoading(true)
     setError('')
     try {
-      const isQRIS = tab === 'QRIS'
       const res = await api.post('/api/v1/confirm', {
         transaction_id: txnId,
-        paymentMethod: isQRIS ? 'QRIS' : 'VIRTUAL_ACCOUNT',
-        paymentRef: isQRIS ? `QRIS-${txnId}` : `VA-${virtualAccount}`,
+        paymentMethod: 'DOKU_CHECKOUT',
+        paymentRef: `CHECKOUT-${txnId}`,
         amount: totalPremium,
       })
       onNext(res)
@@ -492,73 +472,26 @@ function PaymentStep({ initData, onNext, onBack, txnId, annualPremium }) {
           )
         })()}
 
-        {/* Payment method tabs */}
-        <div className="flex rounded-lg border border-gray-200 overflow-hidden">
-          <button
-            onClick={() => setTab('VA')}
-            className={`flex-1 py-2 text-sm font-medium transition-colors ${tab === 'VA' ? 'bg-blue-600 text-white' : 'bg-white text-slate-600 hover:bg-gray-50'}`}
-          >
-            Virtual Account
-          </button>
-          <button
-            onClick={() => setTab('QRIS')}
-            className={`flex-1 py-2 text-sm font-medium transition-colors ${tab === 'QRIS' ? 'bg-blue-600 text-white' : 'bg-white text-slate-600 hover:bg-gray-50'}`}
-          >
-            QRIS
-          </button>
-        </div>
-
-        {tab === 'VA' && (
-          <div className="border-t border-gray-100 pt-4">
-            <p className="text-sm text-slate-500 mb-2">{t('payment.virtual_account')}</p>
-            {bankCode && (
-              <p className="text-sm font-semibold text-slate-700 mb-1 text-center">Bank {bankCode}</p>
-            )}
-            <div className="bg-gray-50 rounded-lg px-4 py-3 font-mono text-lg font-bold tracking-wider text-slate-900 text-center">
-              {virtualAccount}
+        {/* DOKU Checkout */}
+        <div className="border-t border-gray-100 pt-4">
+          <p className="text-sm text-slate-500 mb-3 text-center">Pay via DOKU Checkout — choose VA, QRIS, card, or e-wallet</p>
+          {checkoutUrl ? (
+            <a
+              href={checkoutUrl}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="w-full flex items-center justify-center gap-2 py-3 text-sm bg-blue-600 hover:bg-blue-700 text-white rounded-xl font-semibold transition-colors"
+            >
+              Open DOKU Payment Page ↗
+            </a>
+          ) : (
+            <div className="py-4 text-center">
+              <p className="text-sm text-slate-400">Generating checkout link…</p>
             </div>
-            <p className="text-xs text-slate-400 mt-2 text-center">Transfer the exact amount to this virtual account</p>
-            {howToPayPage && (
-              <a
-                href={howToPayPage}
-                target="_blank"
-                rel="noopener noreferrer"
-                className="mt-3 w-full block text-center py-2 text-sm bg-blue-600 hover:bg-blue-700 text-white rounded-lg font-medium transition-colors"
-              >
-                Pay on DOKU Sandbox (triggers real webhook)
-              </a>
-            )}
-          </div>
-        )}
-
-        {tab === 'QRIS' && (
-          <div className="border-t border-gray-100 pt-4 flex flex-col items-center gap-3">
-            {qrisString ? (
-              <>
-                <p className="text-sm text-slate-500">Scan with your mobile banking or e-wallet app</p>
-                <QRCanvas qrString={qrisString} />
-                <p className="text-xs text-slate-400 text-center">QRIS — IDR {Number(totalPremium).toLocaleString()}</p>
-              </>
-            ) : (
-              <div className="py-6 text-center">
-                <p className="text-sm text-slate-500 font-medium">QRIS not available for this merchant</p>
-                <p className="text-xs text-slate-400 mt-1">Use Virtual Account tab to pay</p>
-              </div>
-            )}
-          </div>
-        )}
-
-        {/* Sandbox simulate fallback */}
-        <div className="border-t border-dashed border-amber-200 pt-4">
-          <p className="text-xs text-amber-600 font-medium mb-1 text-center">Sandbox — no real payment available?</p>
-          <button
-            onClick={handleSimulate}
-            disabled={simulating || fundsHeld}
-            className="w-full py-2 text-sm border border-amber-400 text-amber-700 rounded-lg hover:bg-amber-50 transition-colors disabled:opacity-50"
-          >
-            {simulating ? 'Simulating…' : fundsHeld ? 'Payment received ✓' : 'Simulate Payment (local bypass)'}
-          </button>
+          )}
+          <p className="text-xs text-slate-400 mt-2 text-center">After paying, return here and click "I've Paid"</p>
         </div>
+
       </div>
 
       <div className="flex gap-3">
@@ -812,6 +745,8 @@ function PolicyIssuedStep({ confirmData, txnId }) {
 // Main flow page
 export default function PolicyFlowPage() {
   const { state } = useLocation()
+  const { txnId: urlTxnId } = useParams()
+  const [searchParams] = useSearchParams()
   const [step, setStep] = useState(1)
   const [quoteData, setQuoteData] = useState(null)
   const [initData, setInitData] = useState(null)
@@ -819,6 +754,14 @@ export default function PolicyFlowPage() {
   const [actualTxnId, setActualTxnId] = useState(null)
   const [vehicleForm, setVehicleForm] = useState(null)
   const navigate = useNavigate()
+
+  useEffect(() => {
+    if (urlTxnId && searchParams.get('payment') === 'done') {
+      setActualTxnId(urlTxnId)
+      setStep(4)
+      api.post('/api/v1/payment-received', { transaction_id: urlTxnId }).catch(() => {})
+    }
+  }, [])
 
   // HeroPage passes state.selectedItem
   const product = state?.selectedItem || state?.product || null
@@ -864,6 +807,7 @@ export default function PolicyFlowPage() {
             )}
             {step === 4 && (
               <PaymentStep key="step4" initData={initData} txnId={actualTxnId} annualPremium={annualPremium}
+                paymentDone={!!(urlTxnId && searchParams.get('payment') === 'done')}
                 onNext={(res) => { setConfirmData(res); setStep(5) }} onBack={() => setStep(3)} />
             )}
             {step === 5 && (

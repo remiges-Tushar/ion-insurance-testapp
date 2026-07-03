@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"os"
 	"regexp"
@@ -400,7 +401,15 @@ func (s *BecknService) HandleConfirm(ctx context.Context, req map[string]any) er
 		// SEAM Stage 3: payment must have been received (hold set by DOKU → ION → BPP notification)
 		// before confirm triggers policy issuance. Settlement release happens at reconcile (Stage 5).
 		if !paymentReceived {
-			return fmt.Errorf("payment not yet received: complete the bank transfer or use DOKU sandbox")
+			log.Printf("[SEAM Stage 3] Confirm rejected — payment not yet received for txn=%s invoice=%s", txnID, dokuInvoiceNumber)
+			errResponse := map[string]any{
+				"context": s.buildResponseContext(ctxData, "on_confirm"),
+				"error": map[string]any{
+					"code":    "PAYMENT_NOT_RECEIVED",
+					"message": "Payment not yet received. Please complete payment via DOKU Checkout and wait for webhook confirmation.",
+				},
+			}
+			return s.callOnixCaller("on_confirm", errResponse)
 		}
 
 		fmt.Printf("[SEAM Stage 3] Confirm received — issuing policy (release deferred to reconcile) invoice=%s\n", dokuInvoiceNumber)

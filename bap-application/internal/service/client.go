@@ -28,6 +28,7 @@ type ClientService struct {
 	onixBAPCallerURL string
 	ionServiceURL    string
 	bppWebhookURL    string
+	bapFrontendURL   string
 }
 
 // NewClientService constructs a ClientService.
@@ -38,12 +39,17 @@ func NewClientService(db *pgxpool.Pool, cb *CallbackManager, onixBAPCallerURL, i
 	if bppURL == "" {
 		bppURL = "http://bpp:8080/webhook"
 	}
+	bapFrontendURL := os.Getenv("BAP_FRONTEND_URL")
+	if bapFrontendURL == "" {
+		bapFrontendURL = "http://localhost:3000"
+	}
 	return &ClientService{
 		db:               db,
 		cb:               cb,
 		onixBAPCallerURL: onixBAPCallerURL,
 		ionServiceURL:    ionServiceURL,
 		bppWebhookURL:    bppURL,
+		bapFrontendURL:   bapFrontendURL,
 	}
 }
 
@@ -332,7 +338,18 @@ func (s *ClientService) Confirm(ctx context.Context, req map[string]any) (map[st
 	if err != nil {
 		return nil, err
 	}
-	return parseResponse(body)
+	result, err := parseResponse(body)
+	if err != nil {
+		return nil, err
+	}
+	if errField, ok := result["error"].(map[string]any); ok {
+		msg, _ := errField["message"].(string)
+		if msg == "" {
+			msg = "confirm rejected by BPP"
+		}
+		return nil, fmt.Errorf("%s", msg)
+	}
+	return result, nil
 }
 
 // RequestStatus sends a status request to the network and waits for on_status.
@@ -510,30 +527,17 @@ func (s *ClientService) HandleCallback(ctx context.Context, onAction string, pay
 		ionCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
 		defer cancel()
 
-		if va, err := s.callIONCreateVA(ionCtx, invoiceNumber, totalIDR); err == nil {
+		if co, err := s.callIONCreateCheckout(ionCtx, invoiceNumber, totalIDR, txnId); err == nil {
 			injectIntoConsiderationAttributes(payload, map[string]any{
-				"virtualAccount": va["va_number"],
-				"bankCode":       va["bank_code"],
-				"howToPayPage":   va["how_to_pay_page"],
-				"invoiceNumber":  va["invoice_number"],
+				"checkoutUrl":   co["checkout_url"],
+				"invoiceNumber": co["invoice_number"],
 			})
 			s.db.Exec(ctx,
 				`UPDATE transactions SET doku_invoice_number=$1, doku_va_number=$2, payment_amount=$3 WHERE transaction_id=$4`,
-				va["invoice_number"], va["va_number"], totalIDR, txnId)
-			log.Printf("[SEAM Stage 1] VA created via ION — invoice=%s va=%s", va["invoice_number"], va["va_number"])
+				co["invoice_number"], co["checkout_url"], totalIDR, txnId)
+			log.Printf("[SEAM Stage 1] Checkout created via ION — invoice=%s url=%s", co["invoice_number"], co["checkout_url"])
 		} else {
-			log.Printf("[BAP] ION create-va failed: %v", err)
-		}
-
-		if qr, err := s.callIONCreateQRIS(ionCtx, invoiceNumber, totalIDR); err == nil {
-			injectIntoConsiderationAttributes(payload, map[string]any{
-				"qrisString": qr,
-			})
-			s.db.Exec(ctx,
-				`UPDATE transactions SET doku_qris_string=$1 WHERE transaction_id=$2`,
-				qr, txnId)
-		} else {
-			log.Printf("[BAP] ION create-qris failed (non-fatal): %v", err)
+			log.Printf("[BAP] ION create-checkout failed: %v", err)
 		}
 	}
 
@@ -554,11 +558,14 @@ func (s *ClientService) HandleCallback(ctx context.Context, onAction string, pay
 	case "on_init":
 		s.upsertTransaction(ctx, txnId, "init", "INIT_RECEIVED")
 	case "on_confirm":
-		s.upsertTransaction(ctx, txnId, "confirm", "CONFIRMED")
-		// SEAM Stage 4: auto-send reconcile after policy is issued.
-		policyState := extractPolicyStateFromOnConfirm(payload)
-		if policyState == "ACTIVE" {
-			go s.sendReconcile(context.Background(), txnId)
+		if _, hasError := payload["error"]; hasError {
+			log.Printf("[ClientService] on_confirm error for txn=%s — not marking CONFIRMED", txnId)
+		} else {
+			s.upsertTransaction(ctx, txnId, "confirm", "CONFIRMED")
+			policyState := extractPolicyStateFromOnConfirm(payload)
+			if policyState == "ACTIVE" {
+				go s.sendReconcile(context.Background(), txnId)
+			}
 		}
 	case "on_reconcile":
 		s.upsertTransaction(ctx, txnId, "reconcile", "SETTLED")
@@ -578,6 +585,89 @@ func (s *ClientService) HandleCallback(ctx context.Context, onAction string, pay
 // ---------------------------------------------------------------------------
 // ION service helpers
 // ---------------------------------------------------------------------------
+
+// NotifyPaymentReceived tells ION that the customer paid, bypassing the external DOKU webhook.
+// ION then notifies BPP directly to set payment_received = true.
+func (s *ClientService) NotifyPaymentReceived(ctx context.Context, txnId string) error {
+	var invoiceNumber string
+	var amount int64
+	var checkoutReqID string
+	s.db.QueryRow(ctx,
+		`SELECT COALESCE(doku_invoice_number,''), COALESCE(payment_amount,0),
+		        COALESCE(doku_checkout_request_id,'')
+		 FROM transactions WHERE transaction_id=$1`,
+		txnId,
+	).Scan(&invoiceNumber, &amount, &checkoutReqID)
+	if invoiceNumber == "" {
+		invoiceNumber = "ins-" + txnId
+	}
+	body, _ := json.Marshal(map[string]any{
+		"invoice_number":     invoiceNumber,
+		"amount":             float64(amount),
+		"payment_request_id": checkoutReqID,
+	})
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost,
+		s.ionServiceURL+"/payment/notify-direct", bytes.NewReader(body))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		b, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("notify-direct HTTP %d: %s", resp.StatusCode, string(b))
+	}
+	log.Printf("[BAP] Payment notified via ION direct — txn=%s invoice=%s", txnId, invoiceNumber)
+	return nil
+}
+
+// callIONCreateCheckout calls the ION service to create a DOKU Checkout session.
+// txnID is used to build a deep-link callback_url so DOKU redirects back to the
+// exact payment step in the BAP frontend after the customer pays.
+// Returns map with "checkout_url" and "invoice_number".
+func (s *ClientService) callIONCreateCheckout(ctx context.Context, invoiceNumber string, amountIDR int64, txnID string) (map[string]any, error) {
+	if s.ionServiceURL == "" {
+		return nil, fmt.Errorf("ION_SERVICE_URL not configured")
+	}
+	callbackURL := s.bapFrontendURL + "/policy/" + txnID + "?payment=done"
+	body, _ := json.Marshal(map[string]any{
+		"invoice_number": invoiceNumber,
+		"customer_name":  "ION Insurance Customer",
+		"amount_idr":     amountIDR,
+		"callback_url":   callbackURL,
+	})
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, s.ionServiceURL+"/payment/create-checkout", bytes.NewReader(body))
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	respBytes, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("ION create-checkout HTTP %d: %s", resp.StatusCode, string(respBytes))
+	}
+	var result map[string]any
+	json.Unmarshal(respBytes, &result)
+
+	// Store the checkout Request-Id so NotifyPaymentReceived can forward it to BPP.
+	// BPP needs it as doku_request_id for the DOKU settlement release API.
+	if rid, _ := result["payment_request_id"].(string); rid != "" {
+		s.db.Exec(ctx,
+			`UPDATE transactions SET doku_checkout_request_id=$2 WHERE transaction_id=$1`,
+			txnID, rid,
+		)
+	}
+
+	return result, nil
+}
 
 // callIONCreateVA calls the ION service to create a DOKU VA for the given invoice.
 func (s *ClientService) callIONCreateVA(ctx context.Context, invoiceNumber string, amountIDR int64) (map[string]any, error) {

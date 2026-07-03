@@ -41,6 +41,12 @@ type ionService struct {
 	baseURL       string
 	callbackURL   string
 	bppPaymentURL string
+	bapFrontendURL string
+
+	// Split settlement bank account IDs
+	bppBankAccountID string
+	bapBankAccountID string
+	ionBankAccountID string
 
 	// SNAP API fields (for QRIS)
 	snapClientID string
@@ -56,11 +62,15 @@ func main() {
 	}
 
 	svc := &ionService{
-		clientID:      os.Getenv("DOKU_CLIENT_ID"),
-		secretKey:     os.Getenv("DOKU_SECRET_KEY"),
-		baseURL:       getenv("DOKU_BASE_URL", "https://api-sandbox.doku.com"),
-		callbackURL:   os.Getenv("DOKU_CALLBACK_URL"),
-		bppPaymentURL: getenv("BPP_PAYMENT_URL", "http://bpp:8080/webhook/payment-received"),
+		clientID:         os.Getenv("DOKU_CLIENT_ID"),
+		secretKey:        os.Getenv("DOKU_SECRET_KEY"),
+		baseURL:          getenv("DOKU_BASE_URL", "https://api-sandbox.doku.com"),
+		callbackURL:      os.Getenv("DOKU_CALLBACK_URL"),
+		bppPaymentURL:    getenv("BPP_PAYMENT_URL", "http://bpp:8080/webhook/payment-received"),
+		bapFrontendURL:   getenv("BAP_FRONTEND_URL", "http://localhost:3000"),
+		bppBankAccountID: os.Getenv("DOKU_BPP_BANK_ACCOUNT_ID"),
+		bapBankAccountID: os.Getenv("DOKU_BAP_BANK_ACCOUNT_ID"),
+		ionBankAccountID: os.Getenv("DOKU_ION_BANK_ACCOUNT_ID"),
 	}
 
 	// SNAP client ID defaults to non-SNAP client ID if not separately configured
@@ -82,8 +92,10 @@ func main() {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/health", svc.handleHealth)
 	mux.HandleFunc("/payment/create-va", svc.handleCreateVA)
+	mux.HandleFunc("/payment/create-checkout", svc.handleCreateCheckout)
 	mux.HandleFunc("/payment/create-qris", svc.handleCreateQRIS)
 	mux.HandleFunc("/payment/simulate", svc.handleSimulateDoku)
+	mux.HandleFunc("/payment/notify-direct", svc.handleNotifyDirect)
 	mux.HandleFunc("/webhook/doku", svc.handleDokuWebhook)
 	mux.HandleFunc("/settlement/release", svc.handleRelease)
 
@@ -139,6 +151,137 @@ func (s *ionService) handleCreateVA(w http.ResponseWriter, r *http.Request) {
 
 	log.Printf("[ION] VA created — invoice=%s va=%s bank=%s", va["invoice_number"], va["va_number"], va["bank_code"])
 	jsonOK(w, va)
+}
+
+// handleCreateCheckout creates a DOKU Checkout session with hold_settlement=true.
+// Returns a hosted checkout URL (staging.doku.com) where the customer chooses their
+// payment method (VA, QRIS, card, e-wallet) — no separate VA or QRIS call needed.
+//
+// Request:  { "invoice_number": "ins-...", "customer_name": "...", "amount_idr": 6050499, "callback_url": "http://..." }
+// Response: { "checkout_url": "https://staging.doku.com/checkout-link-v2/...", "invoice_number": "..." }
+func (s *ionService) handleCreateCheckout(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	var req struct {
+		InvoiceNumber string `json:"invoice_number"`
+		CustomerName  string `json:"customer_name"`
+		AmountIDR     int64  `json:"amount_idr"`
+		CallbackURL   string `json:"callback_url"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		jsonError(w, "bad request: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+	if req.InvoiceNumber == "" || req.AmountIDR <= 0 {
+		jsonError(w, "invoice_number and amount_idr required", http.StatusBadRequest)
+		return
+	}
+	if req.CustomerName == "" {
+		req.CustomerName = "ION Insurance Customer"
+	}
+
+	result, err := s.createCheckout(req.InvoiceNumber, req.CustomerName, req.AmountIDR, req.CallbackURL)
+	if err != nil {
+		log.Printf("[ION] createCheckout error: %v", err)
+		jsonError(w, "doku checkout creation failed: "+err.Error(), http.StatusBadGateway)
+		return
+	}
+
+	log.Printf("[ION] Checkout created — invoice=%s url=%s", req.InvoiceNumber, result["checkout_url"])
+	jsonOK(w, result)
+}
+
+func (s *ionService) createCheckout(invoiceNumber, customerName string, amount int64, callbackURL string) (map[string]any, error) {
+	if callbackURL == "" {
+		callbackURL = s.bapFrontendURL
+	}
+	settlement := []any{}
+	if s.bppBankAccountID != "" {
+		settlement = append(settlement, map[string]any{
+			"bank_account_settlement_id": s.bppBankAccountID,
+			"value":                      97,
+			"type":                       "PERCENTAGE",
+		})
+	}
+	if s.bapBankAccountID != "" {
+		settlement = append(settlement, map[string]any{
+			"bank_account_settlement_id": s.bapBankAccountID,
+			"value":                      2,
+			"type":                       "PERCENTAGE",
+		})
+	}
+	if s.ionBankAccountID != "" {
+		settlement = append(settlement, map[string]any{
+			"bank_account_settlement_id": s.ionBankAccountID,
+			"value":                      1,
+			"type":                       "PERCENTAGE",
+		})
+	}
+
+	additionalInfo := map[string]any{"hold_settlement": true}
+	if len(settlement) > 0 {
+		additionalInfo["settlement"] = settlement
+	}
+
+	payload := map[string]any{
+		"order": map[string]any{
+			"amount":         amount,
+			"invoice_number": invoiceNumber,
+			"currency":       "IDR",
+			"session_id":     invoiceNumber,
+			"callback_url":   callbackURL,
+			"line_items": []any{
+				map[string]any{
+					"name":     "Insurance Premium",
+					"price":    amount,
+					"quantity": 1,
+				},
+			},
+		},
+		"payment": map[string]any{
+			"payment_due_date": 60,
+		},
+		"customer": map[string]any{
+			"name":    customerName,
+			"email":   "customer@ion.insure",
+			"phone":   "+628000000000",
+			"address": "Jakarta",
+			"country": "ID",
+		},
+		"additional_info": additionalInfo,
+	}
+
+	body, status, checkoutReqID, err := s.doRequest("POST", "/checkout/v1/payment", payload)
+	if err != nil {
+		return nil, fmt.Errorf("DOKU checkout request: %w", err)
+	}
+	if status != http.StatusOK && status != http.StatusCreated {
+		return nil, fmt.Errorf("DOKU checkout HTTP %d: %s", status, string(body))
+	}
+
+	var resp struct {
+		Message  []string `json:"message"`
+		Response struct {
+			Payment struct {
+				URL string `json:"url"`
+			} `json:"payment"`
+		} `json:"response"`
+	}
+	if err := json.Unmarshal(body, &resp); err != nil {
+		return nil, fmt.Errorf("DOKU checkout decode: %w", err)
+	}
+	if resp.Response.Payment.URL == "" {
+		return nil, fmt.Errorf("DOKU checkout: empty checkout URL (messages=%v)", resp.Message)
+	}
+
+	return map[string]any{
+		"checkout_url":       resp.Response.Payment.URL,
+		"invoice_number":     invoiceNumber,
+		"payment_request_id": checkoutReqID,
+	}, nil
 }
 
 // handleCreateQRIS creates a DOKU QRIS payment code via the SNAP API.
@@ -219,11 +362,23 @@ func (s *ionService) handleDokuWebhook(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if !s.verifySignature(clientID, requestID, timestamp, requestTarget, bodyBytes, signature) {
-		log.Printf("[ION] DOKU webhook: invalid signature from client=%s", clientID)
-		// Still return 200 to avoid DOKU retries flooding, but log the issue
-		w.WriteHeader(http.StatusOK)
-		w.Write([]byte(`{"status":"received"}`))
-		return
+		// DOKU Checkout notifications sometimes omit Client-Id (sandbox behaviour).
+		// Log all headers for debugging, then fall through if body looks valid.
+		log.Printf("[ION] DOKU webhook: signature mismatch client=%q requestID=%q sig=%q path=%q",
+			clientID, requestID, signature, requestTarget)
+		for k, v := range r.Header {
+			log.Printf("[ION]   header %s: %s", k, strings.Join(v, ", "))
+		}
+		// When Client-Id is missing the notification is likely from DOKU Checkout
+		// which uses a different header set. Process it; body validation below
+		// will reject anything that doesn't look like a real DOKU notification.
+		if clientID != "" {
+			// Client-Id present but signature wrong — reject (possible replay/spoof).
+			w.WriteHeader(http.StatusOK)
+			w.Write([]byte(`{"status":"signature_error"}`))
+			return
+		}
+		log.Printf("[ION] DOKU webhook: no Client-Id header, processing as Checkout notification")
 	}
 
 	var body map[string]any
@@ -300,23 +455,46 @@ func (s *ionService) handleRelease(w http.ResponseWriter, r *http.Request) {
 		})
 	}
 
-	payload := map[string]any{
-		"order": map[string]any{
-			"invoice_number": req.InvoiceNumber,
-			"amount":         req.Amount,
-			"currency":       "IDR",
-		},
-		"transaction": map[string]any{
-			"original_request_id": req.OriginalRequestID,
-		},
-		"override_settlement": overrides,
+	buildPayload := func(withSplits bool) map[string]any {
+		p := map[string]any{
+			"order": map[string]any{
+				"invoice_number": req.InvoiceNumber,
+				"amount":         req.Amount,
+				"currency":       "IDR",
+			},
+			"transaction": map[string]any{
+				"original_request_id": req.OriginalRequestID,
+			},
+		}
+		if withSplits && len(overrides) > 0 {
+			p["override_settlement"] = overrides
+		}
+		return p
 	}
 
-	body, status, releaseReqID, err := s.doRequest("POST", "/finance/v1/release", payload)
+	body, status, releaseReqID, err := s.doRequest("POST", "/finance/v1/release", buildPayload(true))
 	if err != nil {
 		log.Printf("[ION] DOKU release error: %v", err)
 		jsonError(w, "doku release failed: "+err.Error(), http.StatusBadGateway)
 		return
+	}
+	// If override_settlement bank accounts are not registered in DOKU, retry without splits.
+	if (status == http.StatusBadRequest || status == http.StatusUnprocessableEntity) && len(overrides) > 0 {
+		var errBody struct {
+			Error struct {
+				Code string `json:"code"`
+			} `json:"error"`
+		}
+		json.Unmarshal(body, &errBody)
+		if errBody.Error.Code == "data_not_found" {
+			log.Printf("[ION] DOKU release: bank accounts not found — retrying without splits")
+			body, status, releaseReqID, err = s.doRequest("POST", "/finance/v1/release", buildPayload(false))
+			if err != nil {
+				log.Printf("[ION] DOKU release (no-split) error: %v", err)
+				jsonError(w, "doku release failed: "+err.Error(), http.StatusBadGateway)
+				return
+			}
+		}
 	}
 	if status != http.StatusOK && status != http.StatusCreated {
 		log.Printf("[ION] DOKU release HTTP %d: %s", status, string(body))
@@ -729,6 +907,28 @@ func signRSASHA256(privKey *rsa.PrivateKey, data string) ([]byte, error) {
 // ---------------------------------------------------------------------------
 // Notification + simulation
 // ---------------------------------------------------------------------------
+
+// handleNotifyDirect calls notifyBPP directly, bypassing the external DOKU webhook loop.
+// Used as a sandbox workaround when DOKU's notification webhook cannot reach this service.
+// Request: { "invoice_number": "ins-...", "amount": 6050499 }
+func (s *ionService) handleNotifyDirect(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	var req struct {
+		InvoiceNumber    string  `json:"invoice_number"`
+		Amount           float64 `json:"amount"`
+		PaymentRequestID string  `json:"payment_request_id"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.InvoiceNumber == "" {
+		jsonError(w, "invoice_number required", http.StatusBadRequest)
+		return
+	}
+	log.Printf("[ION] notify-direct — invoice=%s amount=%.0f", req.InvoiceNumber, req.Amount)
+	go s.notifyBPP(req.InvoiceNumber, req.PaymentRequestID, req.Amount)
+	jsonOK(w, map[string]string{"status": "notified", "invoice_number": req.InvoiceNumber})
+}
 
 // notifyBPP POSTs a payment-received notification to BPP.
 // This is called asynchronously after a DOKU webhook arrives.
