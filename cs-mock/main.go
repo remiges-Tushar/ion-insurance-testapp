@@ -11,7 +11,7 @@ import (
 	"time"
 )
 
-// Mock Cataloging Service entrypoint.
+// Mock Cataloging Service entrypoint (deploy pipeline test #2).
 func main() {
 	port := os.Getenv("CS_PORT")
 	if port == "" {
