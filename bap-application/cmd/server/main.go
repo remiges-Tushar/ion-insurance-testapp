@@ -36,8 +36,11 @@ func main() {
 	// onix-bap caller URL
 	onixCallerURL := getenv("BAP_ONIX_BAP_CALLER_URL", "http://onix-bap:8081/bap/caller")
 
+	// ION service URL (sole DOKU merchant for VA/QRIS creation and settlement)
+	ionServiceURL := getenv("ION_SERVICE_URL", "http://ion:8090")
+
 	// Business logic
-	svc := service.NewClientService(pool, cb, onixCallerURL)
+	svc := service.NewClientService(pool, cb, onixCallerURL, ionServiceURL)
 
 	// HTTP handlers
 	handlers := transport.NewHandlers(svc)

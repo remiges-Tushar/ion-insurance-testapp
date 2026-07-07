@@ -31,9 +31,10 @@ func RegisterRoutes(r *gin.Engine, h *Handlers, authSvc *service.AuthService) {
 		wh.POST("/rate", h.WebhookRate)
 		wh.POST("/support", h.WebhookSupport)
 		wh.POST("/catalog/on_publish", h.WebhookOnPublish)
-		wh.POST("/xendit", h.HandleXenditWebhook)
-		wh.POST("/xendit-qris", h.HandleXenditQRISWebhook)
-		wh.POST("/simulate-payment", h.SimulatePayment) // sandbox testing only
+		wh.POST("/payment-received", h.HandlePaymentReceived) // called by ION service after DOKU webhook
+		wh.POST("/reconcile", h.WebhookReconcile)             // Beckn reconcile from BAP via onix
+		wh.POST("/simulate-payment", h.SimulatePayment)       // sandbox testing only
+		wh.GET("/payment-status", h.GetPaymentStatus)
 	}
 
 	// Protected API routes

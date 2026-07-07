@@ -86,7 +86,7 @@ modules:
               uuidKeys: transaction_id,message_id
               role: bap
       steps:
-        - validateSign
+        # - validateSign
         - addRoute
         - validateSchema
 

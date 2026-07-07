@@ -1,11 +1,12 @@
 import React, { useState, useRef, useEffect } from 'react'
 import QRCode from 'qrcode'
-import { useLocation, useNavigate } from 'react-router-dom'
+import { useLocation, useNavigate, useParams, useSearchParams } from 'react-router-dom'
 import { useTranslation } from 'react-i18next'
 import { motion, AnimatePresence } from 'framer-motion'
 import { Shield, CheckCircle, Download, Loader2, ArrowLeft, Wand2, Star, MessageCircle } from 'lucide-react'
 import { api } from '../api.js'
 import { fmtDate } from '../utils/date.js'
+import SeamStageBar from '../components/SeamStageBar.jsx'
 
 const DEMO_VEHICLE = {
   make: 'Toyota', model: 'Avanza', year: '2022',
@@ -336,35 +337,37 @@ function QRCanvas({ qrString }) {
 }
 
 // Step 4: Payment
-function PaymentStep({ initData, onNext, onBack, txnId, annualPremium }) {
+function PaymentStep({ initData, onNext, onBack, txnId, annualPremium, paymentDone }) {
   const { t } = useTranslation()
   const [loading, setLoading] = useState(false)
-  const [simulating, setSimulating] = useState(false)
-  const [simDone, setSimDone] = useState(false)
+  const [seamStatus, setSeamStatus] = useState(null)
   const [error, setError] = useState('')
-  const [tab, setTab] = useState('VA')
   const submitting = useRef(false)
 
-  // VA details are in considerationAttributes; commitmentAttributes is the fallback
+  // Checkout URL injected by BAP from ION service into considerationAttributes
   const considerationAttrs = initData?.message?.contract?.commitments?.[0]?.considerationAttributes || {}
   const commitmentAttrs = initData?.message?.contract?.commitments?.[0]?.commitmentAttributes || {}
   const totalPremium = considerationAttrs.totalAmountIDR || annualPremium || 0
-  const virtualAccount = considerationAttrs.virtualAccount || commitmentAttrs.virtualAccount || '—'
-  const bankCode = considerationAttrs.bankCode || commitmentAttrs.bankCode || ''
-  const qrisString = considerationAttrs.qrisString || ''
+  const checkoutUrl = considerationAttrs.checkoutUrl || ''
+  const settlementTerms = considerationAttrs.settlementTerms || { sellerPct: 97, buyerAppPct: 2, ionFeePct: 1 }
 
-  async function handleSimulate() {
-    setSimulating(true)
-    setError('')
-    try {
-      await api.post(`/webhook/simulate-payment?txn_id=${txnId}&method=${tab}`)
-      setSimDone(true)
-    } catch (err) {
-      setError(err?.message || 'Simulation failed.')
-    } finally {
-      setSimulating(false)
-    }
-  }
+  // Immediate poll when arriving back from DOKU checkout redirect
+  useEffect(() => {
+    if (!txnId || !paymentDone) return
+    api.get(`/webhook/payment-status?txn_id=${txnId}`).then(setSeamStatus).catch(() => {})
+  }, [txnId, paymentDone])
+
+  // Auto-poll BPP payment status every 3s until payment received
+  useEffect(() => {
+    if (!txnId || seamStatus?.payment_received) return
+    const interval = setInterval(async () => {
+      try {
+        const status = await api.get(`/webhook/payment-status?txn_id=${txnId}`)
+        setSeamStatus(status)
+      } catch {}
+    }, 3000)
+    return () => clearInterval(interval)
+  }, [txnId, seamStatus?.payment_received])
 
   async function handlePaid() {
     if (submitting.current) return
@@ -372,11 +375,10 @@ function PaymentStep({ initData, onNext, onBack, txnId, annualPremium }) {
     setLoading(true)
     setError('')
     try {
-      const isQRIS = tab === 'QRIS'
       const res = await api.post('/api/v1/confirm', {
         transaction_id: txnId,
-        paymentMethod: isQRIS ? 'QRIS' : 'VIRTUAL_ACCOUNT',
-        paymentRef: isQRIS ? `QRIS-${txnId}` : `VA-${virtualAccount}`,
+        paymentMethod: 'DOKU_CHECKOUT',
+        paymentRef: `CHECKOUT-${txnId}`,
         amount: totalPremium,
       })
       onNext(res)
@@ -387,79 +389,127 @@ function PaymentStep({ initData, onNext, onBack, txnId, annualPremium }) {
     }
   }
 
+  const fundsHeld = seamStatus?.payment_received && seamStatus?.policy_status !== 'ACTIVE'
+
   if (loading) return <Spinner />
 
   return (
     <motion.div initial={{ opacity: 0, x: 20 }} animate={{ opacity: 1, x: 0 }} exit={{ opacity: 0, x: -20 }}>
       <h2 className="text-xl font-bold text-slate-900 mb-6">{t('payment.title')}</h2>
       {error && <div className="mb-4 p-3 bg-red-50 text-red-700 rounded-lg text-sm">{error}</div>}
-      <div className="bg-white border border-gray-100 rounded-xl p-6 shadow-sm mb-6 space-y-4">
-        <div>
-          <p className="text-sm text-slate-500 mb-1">{t('payment.total')}</p>
-          <p className="text-3xl font-bold text-slate-900">IDR {Number(totalPremium).toLocaleString()}</p>
-        </div>
-        {/* Payment method tabs */}
-        <div className="flex rounded-lg border border-gray-200 overflow-hidden">
-          <button
-            onClick={() => { setTab('VA'); setSimDone(false) }}
-            className={`flex-1 py-2 text-sm font-medium transition-colors ${tab === 'VA' ? 'bg-blue-600 text-white' : 'bg-white text-slate-600 hover:bg-gray-50'}`}
-          >
-            Virtual Account
-          </button>
-          <button
-            onClick={() => { setTab('QRIS'); setSimDone(false) }}
-            className={`flex-1 py-2 text-sm font-medium transition-colors ${tab === 'QRIS' ? 'bg-blue-600 text-white' : 'bg-white text-slate-600 hover:bg-gray-50'}`}
-          >
-            QRIS
-          </button>
-        </div>
 
-        {tab === 'VA' && (
-          <div className="border-t border-gray-100 pt-4">
-            <p className="text-sm text-slate-500 mb-2">{t('payment.virtual_account')}</p>
-            {bankCode && (
-              <p className="text-sm font-semibold text-slate-700 mb-1 text-center">Bank {bankCode}</p>
-            )}
-            <div className="bg-gray-50 rounded-lg px-4 py-3 font-mono text-lg font-bold tracking-wider text-slate-900 text-center">
-              {virtualAccount}
-            </div>
-            <p className="text-xs text-slate-400 mt-2 text-center">Transfer the exact amount to this virtual account</p>
+      {/* SEAM stage indicator */}
+      {seamStatus ? (
+        <div className={`mb-4 p-4 rounded-xl border ${fundsHeld ? 'bg-orange-50 border-orange-200' : 'bg-green-50 border-green-200'}`}>
+          <p className={`text-xs font-bold uppercase tracking-wide mb-1 ${fundsHeld ? 'text-orange-700' : 'text-green-700'}`}>
+            SEAM — {seamStatus.seam_stage}
+          </p>
+          <div className="grid grid-cols-2 gap-x-4 gap-y-1 text-xs mt-2">
+            <span className="text-slate-500">Policy Status</span>
+            <span className={`font-semibold ${seamStatus.policy_status === 'ACTIVE' ? 'text-green-700' : 'text-orange-700'}`}>{seamStatus.policy_status}</span>
+            <span className="text-slate-500">Funds at DOKU</span>
+            <span className={`font-semibold ${fundsHeld ? 'text-orange-700' : 'text-green-700'}`}>{fundsHeld ? 'HELD' : '—'}</span>
+            <span className="text-slate-500">Invoice</span>
+            <span className="font-mono text-slate-700">{seamStatus.doku_invoice_number || '—'}</span>
           </div>
-        )}
-
-        {tab === 'QRIS' && (
-          <div className="border-t border-gray-100 pt-4 flex flex-col items-center gap-3">
-            <p className="text-sm text-slate-500">Scan with your mobile banking or e-wallet app</p>
-            <QRCanvas qrString={qrisString} />
-            <p className="text-xs text-slate-400 text-center">QRIS — IDR {Number(totalPremium).toLocaleString()}</p>
-          </div>
-        )}
-
-        {/* Sandbox test helper */}
-        <div className="border-t border-dashed border-amber-200 pt-4">
-          <p className="text-xs text-amber-600 font-medium mb-2 text-center">⚡ Sandbox Testing</p>
-          {simDone ? (
-            <p className="text-xs text-green-600 text-center font-medium">Payment simulated! Now click "I Have Completed Payment" below.</p>
-          ) : (
-            <button
-              onClick={handleSimulate}
-              disabled={simulating}
-              className="w-full py-2 text-sm border border-amber-400 text-amber-700 rounded-lg hover:bg-amber-50 transition-colors disabled:opacity-50"
-            >
-              {simulating ? 'Simulating...' : `Simulate ${tab === 'QRIS' ? 'QRIS' : 'VA'} Payment (Test)`}
-            </button>
+          {fundsHeld && (
+            <p className="text-xs text-orange-600 mt-2 font-medium">
+              Funds held at DOKU. Click "Confirm Payment" to issue the policy.
+            </p>
           )}
         </div>
+      ) : (
+        <div className="mb-4 p-3 rounded-xl border border-blue-100 bg-blue-50 flex items-center gap-2">
+          <Loader2 size={14} className="animate-spin text-blue-500" />
+          <span className="text-xs text-blue-600">Waiting for payment confirmation via ION…</span>
+        </div>
+      )}
+
+      <div className="bg-white border border-gray-100 rounded-xl p-6 shadow-sm mb-6 space-y-4">
+        <div className="flex items-end justify-between">
+          <div>
+            <p className="text-sm text-slate-500 mb-1">{t('payment.total')}</p>
+            <p className="text-3xl font-bold text-slate-900">IDR {Number(totalPremium).toLocaleString()}</p>
+          </div>
+        </div>
+
+        {/* Settlement breakdown */}
+        {(() => {
+          const splits = [
+            { label: 'BPP (Insurer)',     pct: settlementTerms.sellerPct   ?? 97, color: 'bg-blue-500',   text: 'text-blue-700'   },
+            { label: 'BAP (Buyer App)',   pct: settlementTerms.buyerAppPct ?? 2,  color: 'bg-violet-500', text: 'text-violet-700' },
+            { label: 'ION (Network Fee)', pct: settlementTerms.ionFeePct   ?? 1,  color: 'bg-amber-500',  text: 'text-amber-700'  },
+          ]
+          const total = splits.reduce((s, r) => s + Math.round(totalPremium * r.pct / 100), 0)
+          return (
+            <div className="bg-slate-50 rounded-xl p-4 border border-slate-100">
+              <p className="text-xs font-semibold text-slate-500 uppercase tracking-wide mb-3">Settlement Distribution</p>
+              <div className="space-y-3">
+                {splits.map(({ label, pct, color, text }) => {
+                  const amt = Math.round(totalPremium * pct / 100)
+                  return (
+                    <div key={label}>
+                      <div className="flex justify-between text-xs mb-1">
+                        <span className="text-slate-600">{label}</span>
+                        <span className="flex items-center gap-2">
+                          <span className="text-slate-400 font-mono">IDR {amt.toLocaleString('id-ID')}</span>
+                          <span className={`font-bold ${text} w-8 text-right`}>{pct}%</span>
+                        </span>
+                      </div>
+                      <div className="h-2 bg-slate-200 rounded-full overflow-hidden">
+                        <div className={`h-full rounded-full ${color}`} style={{ width: `${pct}%` }} />
+                      </div>
+                    </div>
+                  )
+                })}
+              </div>
+              <div className="mt-3 pt-3 border-t border-slate-200 flex justify-between text-xs">
+                <span className="font-semibold text-slate-600">Total</span>
+                <span className="font-bold text-slate-900 font-mono">IDR {total.toLocaleString('id-ID')}</span>
+              </div>
+              <p className="text-[10px] text-slate-400 mt-1">Funds held by DOKU, released on settlement confirmation.</p>
+            </div>
+          )
+        })()}
+
+        {/* DOKU Checkout */}
+        <div className="border-t border-gray-100 pt-4">
+          <p className="text-sm text-slate-500 mb-3 text-center">Pay via DOKU Checkout — choose VA, QRIS, card, or e-wallet</p>
+          {checkoutUrl ? (
+            <a
+              href={checkoutUrl}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="w-full flex items-center justify-center gap-2 py-3 text-sm bg-blue-600 hover:bg-blue-700 text-white rounded-xl font-semibold transition-colors"
+            >
+              Open DOKU Payment Page ↗
+            </a>
+          ) : (
+            <div className="py-4 text-center">
+              <p className="text-sm text-slate-400">Generating checkout link…</p>
+            </div>
+          )}
+          <p className="text-xs text-slate-400 mt-2 text-center">After paying, return here and click "I've Paid"</p>
+        </div>
+
       </div>
+
       <div className="flex gap-3">
         <button onClick={onBack} className="flex-1 border border-gray-300 text-slate-600 py-3 rounded-xl font-medium hover:bg-gray-50">{t('common.back')}</button>
-        <button onClick={handlePaid} disabled={loading} className="flex-1 bg-green-600 text-white py-3 rounded-xl font-medium hover:bg-green-700 transition-colors disabled:opacity-60 disabled:cursor-not-allowed">{t('payment.paid')}</button>
+        <button
+          onClick={handlePaid}
+          disabled={loading || !seamStatus?.payment_received}
+          className="flex-1 py-3 rounded-xl font-medium transition-colors disabled:opacity-60 disabled:cursor-not-allowed bg-orange-500 hover:bg-orange-600 text-white"
+        >
+          {fundsHeld ? 'Confirm Payment (SEAM Stage 3)' : t('payment.paid')}
+        </button>
       </div>
     </motion.div>
   )
 }
 
 // Step 5: Policy Issued
+
 function PolicyIssuedStep({ confirmData, txnId }) {
   const { t } = useTranslation()
   const navigate = useNavigate()
@@ -470,6 +520,22 @@ function PolicyIssuedStep({ confirmData, txnId }) {
   const certificateUrl = attrs.certificateUrl
   const coverageStart = attrs.coverageStart || attrs.coverageStartDate
   const coverageEnd = attrs.coverageEnd || attrs.coverageEndDate
+
+  // SEAM settlement polling
+  const [seamStage, setSeamStage] = useState('policy_issued')
+
+  useEffect(() => {
+    if (!txnId || seamStage === 'settled') return
+    const interval = setInterval(async () => {
+      try {
+        const status = await api.get(`/api/v1/status/${txnId}`)
+        if (status?.status === 'SETTLED') setSeamStage('settled')
+        else if (status?.status === 'RECONCILING') setSeamStage('reconciling')
+        else if (status?.action === 'confirm' || status?.latest_on_action === 'on_confirm') setSeamStage('policy_issued')
+      } catch {}
+    }, 3000)
+    return () => clearInterval(interval)
+  }, [txnId, seamStage])
 
   // Rating state
   const [rating, setRating] = useState(0)
@@ -549,6 +615,18 @@ function PolicyIssuedStep({ confirmData, txnId }) {
             <span className="font-medium text-slate-900 text-sm">{fmtDate(coverageEnd)}</span>
           </div>
         )}
+      </div>
+
+      {/* SEAM settlement progress */}
+      <div className="bg-white border border-gray-100 rounded-xl p-4 shadow-sm mb-4">
+        <div className="flex items-center justify-between mb-3">
+          <span className="text-xs font-semibold text-slate-600 uppercase tracking-wide">SEAM Settlement</span>
+          {seamStage === 'settled'
+            ? <span className="text-xs font-bold text-green-600 bg-green-50 px-2 py-0.5 rounded-full">SETTLED</span>
+            : <span className="flex items-center gap-1 text-xs text-blue-600"><Loader2 size={12} className="animate-spin" /> In progress</span>
+          }
+        </div>
+        <SeamStageBar stage={seamStage} />
       </div>
 
       {certificateUrl && (
@@ -667,6 +745,8 @@ function PolicyIssuedStep({ confirmData, txnId }) {
 // Main flow page
 export default function PolicyFlowPage() {
   const { state } = useLocation()
+  const { txnId: urlTxnId } = useParams()
+  const [searchParams] = useSearchParams()
   const [step, setStep] = useState(1)
   const [quoteData, setQuoteData] = useState(null)
   const [initData, setInitData] = useState(null)
@@ -674,6 +754,14 @@ export default function PolicyFlowPage() {
   const [actualTxnId, setActualTxnId] = useState(null)
   const [vehicleForm, setVehicleForm] = useState(null)
   const navigate = useNavigate()
+
+  useEffect(() => {
+    if (urlTxnId && searchParams.get('payment') === 'done') {
+      setActualTxnId(urlTxnId)
+      setStep(4)
+      api.post('/api/v1/payment-received', { transaction_id: urlTxnId }).catch(() => {})
+    }
+  }, [])
 
   // HeroPage passes state.selectedItem
   const product = state?.selectedItem || state?.product || null
@@ -719,6 +807,7 @@ export default function PolicyFlowPage() {
             )}
             {step === 4 && (
               <PaymentStep key="step4" initData={initData} txnId={actualTxnId} annualPremium={annualPremium}
+                paymentDone={!!(urlTxnId && searchParams.get('payment') === 'done')}
                 onNext={(res) => { setConfirmData(res); setStep(5) }} onBack={() => setStep(3)} />
             )}
             {step === 5 && (

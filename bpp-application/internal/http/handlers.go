@@ -56,6 +56,20 @@ func (h *Handlers) Login(c *gin.Context) {
 
 // Dashboard
 
+func (h *Handlers) GetPaymentStatus(c *gin.Context) {
+	txnID := c.Query("txn_id")
+	if txnID == "" {
+		writeProblem(c, http.StatusBadRequest, "Bad Request", "txn_id required")
+		return
+	}
+	status, err := h.beckn.GetPaymentStatus(c.Request.Context(), txnID)
+	if err != nil {
+		writeProblem(c, http.StatusNotFound, "Not Found", err.Error())
+		return
+	}
+	c.JSON(http.StatusOK, status)
+}
+
 func (h *Handlers) GetStats(c *gin.Context) {
 	stats, err := h.beckn.GetDashboardStats(c.Request.Context())
 	if err != nil {
@@ -394,73 +408,52 @@ func (h *Handlers) WebhookOnPublish(c *gin.Context) {
 	c.JSON(http.StatusOK, ackACK())
 }
 
-// Webhook: Xendit payment notification
-func (h *Handlers) HandleXenditWebhook(c *gin.Context) {
-	token := c.GetHeader("x-callback-token")
-	if !h.beckn.VerifyXenditToken(token) {
-		c.JSON(http.StatusForbidden, gin.H{"error": "invalid callback token"})
-		return
+// HandlePaymentReceived — called by ION service after DOKU payment webhook (not Beckn).
+// ION receives the DOKU webhook, verifies signature, then POSTs here.
+func (h *Handlers) HandlePaymentReceived(c *gin.Context) {
+	var body struct {
+		InvoiceNumber     string  `json:"invoice_number"`
+		PaymentRequestID  string  `json:"payment_request_id"`
+		Amount            float64 `json:"amount"`
 	}
-	var body map[string]any
 	if err := c.ShouldBindJSON(&body); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
-	externalID, _ := body["external_id"].(string)
-	amount, _ := body["amount"].(float64)
-	bankCode, _ := body["bank_code"].(string)
-
-	if err := h.beckn.ProcessXenditPayment(c.Request.Context(), externalID, amount, bankCode); err != nil {
-		// Return 200 so Xendit does not retry; error is already logged by the service.
+	if body.InvoiceNumber == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invoice_number required"})
+		return
+	}
+	if err := h.beckn.HandlePaymentReceived(c.Request.Context(), body.InvoiceNumber, body.PaymentRequestID, body.Amount); err != nil {
 		c.JSON(http.StatusOK, gin.H{"status": "received", "error": err.Error()})
 		return
 	}
 	c.JSON(http.StatusOK, gin.H{"status": "ok"})
 }
 
-// Webhook: Xendit QRIS payment notification
-func (h *Handlers) HandleXenditQRISWebhook(c *gin.Context) {
-	token := c.GetHeader("x-callback-token")
-	if !h.beckn.VerifyXenditToken(token) {
-		c.JSON(http.StatusForbidden, gin.H{"error": "invalid callback token"})
+// WebhookReconcile handles the Beckn reconcile action from BAP (via onix-bpp).
+func (h *Handlers) WebhookReconcile(c *gin.Context) {
+	var req map[string]any
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, ackNACK())
 		return
 	}
-	var body map[string]any
-	if err := c.ShouldBindJSON(&body); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
-		return
-	}
-	// QRIS webhook: { "event": "qr.payment", "data": { "reference_id": "...", "amount": ..., "status": "SUCCEEDED" } }
-	data, _ := body["data"].(map[string]any)
-	referenceID, _ := data["reference_id"].(string)
-	amount, _ := data["amount"].(float64)
-	status, _ := data["status"].(string)
-
-	if status != "SUCCEEDED" {
-		c.JSON(http.StatusOK, gin.H{"status": "ignored", "payment_status": status})
-		return
-	}
-
-	if err := h.beckn.ProcessXenditQRISPayment(c.Request.Context(), referenceID, amount); err != nil {
-		c.JSON(http.StatusOK, gin.H{"status": "received", "error": err.Error()})
-		return
-	}
-	c.JSON(http.StatusOK, gin.H{"status": "ok"})
+	go h.beckn.HandleReconcile(context.Background(), req)
+	c.JSON(http.StatusOK, ackACK())
 }
 
-// SimulatePayment — sandbox only, triggers Xendit test payment
+// SimulatePayment — sandbox only: marks payment_received=true without going through DOKU.
 func (h *Handlers) SimulatePayment(c *gin.Context) {
 	txnID := c.Query("txn_id")
-	method := c.DefaultQuery("method", "VA") // VA or QRIS
 	if txnID == "" {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "txn_id required"})
 		return
 	}
-	if err := h.beckn.SimulatePayment(c.Request.Context(), txnID, method); err != nil {
+	if err := h.beckn.SimulatePayment(c.Request.Context(), txnID); err != nil {
 		c.JSON(http.StatusBadGateway, gin.H{"error": err.Error()})
 		return
 	}
-	c.JSON(http.StatusOK, gin.H{"status": "simulated", "method": method})
+	c.JSON(http.StatusOK, gin.H{"status": "simulated"})
 }
 
 func ackACK() map[string]any {

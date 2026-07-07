@@ -76,8 +76,32 @@ services:
     networks:
       - insurance_network
 
+  ion:
+    build:
+      context: ./ion-service
+      dockerfile: Dockerfile
+    container_name: insurance-ion
+    env_file:
+      - path: ./ion-service/.env
+        required: false
+    environment:
+      ION_PORT: "8090"
+      DOKU_CLIENT_ID: BRN-0299-1782374867869
+      DOKU_SECRET_KEY: SK-RZNjjFOg8s8i3FHIoB4m
+      DOKU_BASE_URL: https://api-sandbox.doku.com
+      DOKU_CALLBACK_URL: "https://365db902dceb51.lhr.life/webhook/doku"
+      BPP_PAYMENT_URL: "http://bpp:8080/webhook/payment-received"
+      DOKU_BPP_BANK_ACCOUNT_ID: BNK-0002-1782383276041
+      DOKU_BAP_BANK_ACCOUNT_ID: BNK-0001-1782383221155
+      DOKU_ION_BANK_ACCOUNT_ID: BNK-0010-1782548213200
+      BAP_FRONTEND_URL: "http://localhost:3000"
+    ports:
+      - "8090:8090"
+    networks:
+      - insurance_network
+
   onix-bpp:
-    image: fidedocker/onix-adapter
+    image: fidedocker/onix-adapter:1.6.1
     container_name: insurance-onix-bpp
     platform: linux/amd64
     ports:
@@ -88,6 +112,9 @@ services:
     volumes:
       - ./config:/app/config:ro
     command: ["./server", "--config=/app/config/insurance-bpp.yaml"]
+    dns:
+      - 8.8.8.8
+      - 1.1.1.1
     depends_on:
       redis:
         condition: service_healthy
@@ -95,7 +122,7 @@ services:
       - insurance_network
 
   onix-bap:
-    image: fidedocker/onix-adapter
+    image: fidedocker/onix-adapter:1.6.1
     container_name: insurance-onix-bap
     platform: linux/amd64
     ports:
@@ -106,6 +133,9 @@ services:
     volumes:
       - ./config:/app/config:ro
     command: ["./server", "--config=/app/config/insurance-bap.yaml"]
+    dns:
+      - 8.8.8.8
+      - 1.1.1.1
     depends_on:
       redis:
         condition: service_healthy
@@ -129,9 +159,10 @@ services:
       BPP_SERVER_PORT: "8080"
       BPP_JWT_SECRET: insurance-bpp-jwt-secret-change-in-production
       BPP_ONIX_BPP_CALLER_URL: http://onix-bpp:8082/bpp/caller
-      XENDIT_SECRET_KEY: xnd_development_jsbegEdZLGIjBmW8g3i4CAXQLc271svFgmR0Xcsg5xIHNshGcbBHFngbOnsK1
-      XENDIT_WEBHOOK_TOKEN: mDbjHaAEZGdgSmVmeAhNPcCThtc4olmivxQjD7ujfYEqGPFi
-      XENDIT_BASE_URL: https://api.xendit.co
+      ION_SERVICE_URL: "http://ion:8090"
+      DOKU_BPP_BANK_ACCOUNT_ID: BNK-0002-1782383276041
+      DOKU_BAP_BANK_ACCOUNT_ID: BNK-0001-1782383221155
+      DOKU_ION_BANK_ACCOUNT_ID: BNK-0003-1782383300000
     depends_on:
       migrate-bpp:
         condition: service_completed_successfully
@@ -157,6 +188,8 @@ services:
       BAP_SERVER_PORT: "8083"
       BAP_REDIS_ADDR: redis:6379
       BAP_ONIX_BAP_CALLER_URL: http://onix-bap:8081/bap/caller
+      ION_SERVICE_URL: "http://ion:8090"
+      BAP_FRONTEND_URL: "http://localhost:3000"
     depends_on:
       migrate-bap:
         condition: service_completed_successfully
@@ -170,8 +203,13 @@ services:
       context: ./bpp-frontend
       dockerfile: Dockerfile
     container_name: insurance-bpp-frontend
+    environment:
+      BPP_URL: http://bpp:8080
+      NGINX_RESOLVER: "127.0.0.11 8.8.8.8 8.8.4.4"
     ports:
       - "3001:80"
+    volumes:
+      - ./bpp-frontend/nginx.conf:/etc/nginx/templates/default.conf.template:ro
     depends_on:
       - bpp
     networks:
@@ -182,8 +220,15 @@ services:
       context: ./bap-frontend
       dockerfile: Dockerfile
     container_name: insurance-bap-frontend
+    environment:
+      BAP_URL: http://bap:8083
+      BPP_URL: http://bpp:8080
+      ION_URL: http://ion:8090
+      NGINX_RESOLVER: "127.0.0.11 8.8.8.8 8.8.4.4"
     ports:
       - "3000:80"
+    volumes:
+      - ./bap-frontend/nginx.conf:/etc/nginx/templates/default.conf.template:ro
     depends_on:
       - bap
     networks:

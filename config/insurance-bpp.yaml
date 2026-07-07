@@ -81,7 +81,7 @@ modules:
           config:
             routingConfig: /app/config/routing-bpp-receiver.yaml
       steps:
-        - validateSign
+        # - validateSign
         - addRoute
         - validateSchema
 

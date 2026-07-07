@@ -1,6 +1,7 @@
 package transport
 
 import (
+	"log"
 	"net/http"
 
 	"github.com/gin-gonic/gin"
@@ -192,6 +193,17 @@ func (h *Handlers) Support(c *gin.Context) {
 	c.JSON(http.StatusOK, result)
 }
 
+// ListOrders handles GET /api/v1/orders
+// Returns all transactions with SEAM stage info.
+func (h *Handlers) ListOrders(c *gin.Context) {
+	orders, err := h.svc.ListOrders(c.Request.Context())
+	if err != nil {
+		writeProblem(c, http.StatusInternalServerError, "Internal Error", err.Error())
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"orders": orders})
+}
+
 // ListPolicies handles GET /api/v1/policies
 // Returns all confirmed policy snapshots from the DB.
 func (h *Handlers) ListPolicies(c *gin.Context) {
@@ -324,4 +336,33 @@ func (h *Handlers) OnSupport(c *gin.Context) {
 		_ = err
 	}
 	c.JSON(http.StatusOK, ackACK())
+}
+
+func (h *Handlers) OnReconcile(c *gin.Context) {
+	var payload map[string]any
+	if err := c.ShouldBindJSON(&payload); err != nil {
+		c.JSON(http.StatusBadRequest, ackNACK())
+		return
+	}
+	if err := h.svc.HandleCallback(c.Request.Context(), "on_reconcile", payload); err != nil {
+		_ = err
+	}
+	c.JSON(http.StatusOK, ackACK())
+}
+
+// PaymentReceived handles POST /api/v1/payment-received
+// Called by the frontend on redirect back from DOKU Checkout (?payment=done).
+// Triggers ION → BPP payment notification directly, bypassing the external webhook tunnel.
+func (h *Handlers) PaymentReceived(c *gin.Context) {
+	var req struct {
+		TransactionID string `json:"transaction_id"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil || req.TransactionID == "" {
+		writeProblem(c, http.StatusBadRequest, "Bad Request", "transaction_id required")
+		return
+	}
+	if err := h.svc.NotifyPaymentReceived(c.Request.Context(), req.TransactionID); err != nil {
+		log.Printf("[BAP] PaymentReceived notify failed: %v", err)
+	}
+	c.JSON(http.StatusOK, gin.H{"status": "notified"})
 }

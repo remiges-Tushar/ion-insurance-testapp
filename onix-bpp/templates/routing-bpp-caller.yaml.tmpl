@@ -1,0 +1,21 @@
+routingRules:
+  - version: "2.0.0"
+    targetType: "url"
+    target:
+      url: "${ONIX_BAP_URL}/bap/receiver"
+    endpoints:
+      - on_discover
+      - on_select
+      - on_init
+      - on_confirm
+      - on_status
+      - on_cancel
+      - on_rate
+      - on_support
+      - on_reconcile
+  - version: "2.0.0"
+    targetType: "url"
+    target:
+      url: "${CS_URL}/catalog"
+    endpoints:
+      - publish

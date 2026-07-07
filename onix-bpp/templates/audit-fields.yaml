@@ -1,0 +1,76 @@
+auditRules:
+  default:
+    - context
+    - message
+    - error
+
+  search:
+    - context
+    - message
+    - context.transaction_id
+    - context.message_id
+    - context.action
+    - context.timestamp
+
+  select:
+    - context
+    - message
+    - error
+    - context.transaction_id
+    - context.message_id
+    - context.action
+    - context.timestamp
+
+  init:
+    - context
+    - message
+    - error
+    - context.transaction_id
+    - context.message_id
+    - context.action
+    - context.timestamp
+
+  confirm:
+    - context
+    - message
+    - error
+    - context.transaction_id
+    - context.message_id
+    - context.action
+    - context.timestamp
+
+  status:
+    - context
+    - message
+    - error
+    - context.transaction_id
+    - context.message_id
+    - context.action
+    - context.timestamp
+
+  cancel:
+    - context
+    - message
+    - error
+    - context.transaction_id
+    - context.message_id
+    - context.action
+    - context.timestamp
+
+  rate:
+    - context
+    - message
+    - error
+    - context.transaction_id
+    - context.message_id
+    - context.action
+    - context.timestamp
+
+  support:
+    - context
+    - message
+    - error
+    - context.transaction_id
+    - context.message_id
+    - context.action
+    - context.timestamp

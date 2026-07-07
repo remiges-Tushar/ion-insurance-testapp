@@ -31,8 +31,11 @@ func RegisterRoutes(r *gin.Engine, h *Handlers) {
 		api.POST("/rate", h.Rate)
 		api.POST("/support", h.Support)
 
+		api.GET("/orders", h.ListOrders)
 		api.GET("/policies", h.ListPolicies)
 		api.GET("/policies/:id", h.GetPolicy)
+
+		api.POST("/payment-received", h.PaymentReceived)
 	}
 
 	// Beckn callback webhooks (called by onix-bap when BPP responds)
@@ -46,5 +49,6 @@ func RegisterRoutes(r *gin.Engine, h *Handlers) {
 		wh.POST("/on_cancel", h.OnCancel)
 		wh.POST("/on_rate", h.OnRate)
 		wh.POST("/on_support", h.OnSupport)
+		wh.POST("/on_reconcile", h.OnReconcile)
 	}
 }

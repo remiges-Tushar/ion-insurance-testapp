@@ -29,3 +29,14 @@ postgres-data/
 
 # Go build cache
 /tmp/
+WhatsApp Image 2026-06-25 at 11.29.39 AM.jpeg
+backup_codes.csv
+Settlement Assurance Mechanism on ION (1).pdf
+
+# Terraform
+terraform/.terraform/
+terraform/*.tfstate
+terraform/*.tfstate.*
+terraform/.terraform.lock.hcl
+terraform/terraform.tfvars
+terraform/*.tfplan

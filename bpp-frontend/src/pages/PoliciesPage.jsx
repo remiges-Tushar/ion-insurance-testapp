@@ -2,14 +2,43 @@ import React, { useState, useEffect } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { useTranslation } from 'react-i18next'
 import { motion } from 'framer-motion'
-import { Search } from 'lucide-react'
+import { Search, CheckCircle, Clock, Banknote } from 'lucide-react'
 import client from '../api/client.js'
 import StatusBadge from '../components/StatusBadge.jsx'
-import { fmtDate, fmtDateTime } from '../utils/date.js'
+import { fmtDate } from '../utils/date.js'
 
 function formatIDR(n) {
   if (n == null) return '—'
   return 'IDR ' + Number(n).toLocaleString('id-ID')
+}
+
+function PaymentBadge({ received }) {
+  if (received) {
+    return (
+      <span className="inline-flex items-center gap-1 text-xs font-semibold px-2 py-0.5 rounded-full bg-emerald-50 border border-emerald-200 text-emerald-600">
+        <CheckCircle size={10} /> Paid
+      </span>
+    )
+  }
+  return (
+    <span className="inline-flex items-center gap-1 text-xs font-semibold px-2 py-0.5 rounded-full bg-amber-50 border border-amber-200 text-amber-600">
+      <Clock size={10} /> Pending
+    </span>
+  )
+}
+
+function SettlementBadge({ status }) {
+  const s = status || 'PENDING'
+  const isSettled = s === 'SETTLED'
+  return (
+    <span className={`inline-flex items-center gap-1 text-xs font-semibold px-2 py-0.5 rounded-full border ${
+      isSettled
+        ? 'bg-emerald-50 border-emerald-200 text-emerald-600'
+        : 'bg-slate-50 border-slate-200 text-slate-500'
+    }`}>
+      <Banknote size={10} /> {s}
+    </span>
+  )
 }
 
 export default function PoliciesPage() {
@@ -84,6 +113,8 @@ export default function PoliciesPage() {
                   t('policies.policyholder_nik'),
                   t('policies.vehicle_vin'),
                   t('policies.idv'),
+                  'Payment',
+                  'Settlement',
                   t('policies.created_at'),
                 ].map(h => (
                   <th key={h} className="text-left px-5 py-3.5 text-xs font-semibold text-slate-500 uppercase tracking-wide">
@@ -114,6 +145,12 @@ export default function PoliciesPage() {
                   <td className="px-5 py-3.5 text-slate-700">
                     {formatIDR(p.idv)}
                   </td>
+                  <td className="px-5 py-3.5">
+                    <PaymentBadge received={p.payment_received} />
+                  </td>
+                  <td className="px-5 py-3.5">
+                    <SettlementBadge status={p.reconcile_status} />
+                  </td>
                   <td className="px-5 py-3.5 text-slate-500">
                     {fmtDate(p.created_at)}
                   </td>
@@ -121,7 +158,7 @@ export default function PoliciesPage() {
               ))}
               {filtered.length === 0 && (
                 <tr>
-                  <td colSpan={6} className="py-16 text-center text-slate-400 text-sm">
+                  <td colSpan={8} className="py-16 text-center text-slate-400 text-sm">
                     {t('common.no_data')}
                   </td>
                 </tr>
