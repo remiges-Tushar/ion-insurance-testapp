@@ -1,0 +1,93 @@
+name: Terraform Apply
+
+# Two separate jobs, not one — a GitHub Environment approval gate pauses a
+# job before its FIRST step runs, it can't pause in the middle of one job.
+# Splitting plan and apply into separate jobs is the only way for a reviewer
+# to see the exact diff before clicking approve.
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'terraform/**'
+  workflow_dispatch: {} # manual fallback trigger
+
+env:
+  TF_VAR_project_id: ${{ vars.GCP_PROJECT_ID }}
+
+jobs:
+  plan:
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+      contents: read
+    defaults:
+      run:
+        working-directory: terraform
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: projects/393691661756/locations/global/workloadIdentityPools/github-pool/providers/github-provider
+          service_account: tf-plan@remiges-ion.iam.gserviceaccount.com
+
+      - uses: hashicorp/setup-terraform@v3
+
+      - run: terraform init
+
+      - run: terraform plan -no-color -input=false -out=tfplan
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: tfplan
+          path: terraform/tfplan
+          retention-days: 1
+          # Note: this is a public repo, so this artifact is fetchable by any
+          # authenticated GitHub user for its 1-day retention window. The raw
+          # plan binary is NOT redacted the way Terraform's CLI text output
+          # is — random_password.postgres.result (the one secret value
+          # Terraform generates itself) would appear here in plaintext IF
+          # that resource shows up in this particular diff. In practice that
+          # only happens on initial creation or if secrets.tf itself changes
+          # — routine changes (env vars, memory limits, etc.) won't surface
+          # it. Worth a second look on any PR that touches secrets.tf.
+
+  apply:
+    needs: plan
+    runs-on: ubuntu-latest
+    environment: production # <- this line is what pauses for manual approval
+    permissions:
+      id-token: write
+      contents: read
+    defaults:
+      run:
+        working-directory: terraform
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: projects/393691661756/locations/global/workloadIdentityPools/github-pool/providers/github-provider
+          service_account: tf-apply@remiges-ion.iam.gserviceaccount.com
+
+      # Required specifically because cloud-run-wiring.tf's local-exec shells
+      # out to plain `gcloud`, bypassing the Terraform provider entirely.
+      # auth@v2 alone only sets up Application Default Credentials (which the
+      # provider auto-discovers) — it does NOT configure the gcloud CLI's own
+      # credential store. Without this step, the wiring step fails at the
+      # very last part of apply, after everything else already succeeded.
+      - uses: google-github-actions/setup-gcloud@v2
+
+      - uses: hashicorp/setup-terraform@v3
+
+      - run: terraform init
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: tfplan
+          path: terraform
+
+      # Applies the EXACT plan a human already saw and approved — not a
+      # fresh plan computed after approval, which could differ if anything
+      # changed between the plan job running and the approval click.
+      - run: terraform apply tfplan

@@ -8,6 +8,32 @@ no scale-to-zero tier on GCP.
 This directory replaces `docker-compose.yml`'s Docker-network hostnames
 (`http://bap:8083`, `redis:6379`, ...) with Cloud Run's per-service HTTPS URLs.
 
+## How changes actually get applied now
+
+State lives in a GCS bucket (`gs://remiges-ion-tfstate`), not a local file —
+see `backend.tf`. **`terraform apply` is no longer meant to be run from a
+laptop.** The supported flow is:
+
+1. Open a PR touching `terraform/`. `.github/workflows/terraform-plan.yml`
+   runs `terraform plan` automatically and posts the diff as a PR comment.
+2. Review the plan comment, not just the code, before approving.
+3. Merge to `main`. `.github/workflows/terraform-apply.yml` runs `plan` again
+   (ungated), then pauses the `apply` job for a manual approval click — via
+   the `production` GitHub Environment — before actually running
+   `terraform apply` against the exact plan that was just reviewed.
+
+Both workflows authenticate to GCP via Workload Identity Federation — no
+service account keys are stored in GitHub. `plan` runs as the read-only
+`tf-plan@remiges-ion.iam.gserviceaccount.com`; `apply` runs as
+`tf-apply@remiges-ion.iam.gserviceaccount.com`, which GCP will only issue a
+credential for to a workflow job that declares `environment: production` —
+the approval gate is enforced at the credential level, not just in YAML.
+
+The steps below (1–4) describe how this infrastructure was originally
+bootstrapped by hand, before the pipeline existed — kept for reference and
+for anyone standing up a fresh copy of this stack in a new project, but day
+to day, changes should go through a PR as described above.
+
 ## Prerequisites
 
 - `gcloud` CLI, authenticated (`gcloud auth login`), with a GCP project that has billing enabled.
