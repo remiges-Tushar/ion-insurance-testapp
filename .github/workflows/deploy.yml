@@ -1,0 +1,151 @@
+name: Deploy app code
+
+# Deploys automatically on merge to main — no approval gate, unlike
+# terraform-apply.yml. Cloud Run revisions are trivially rollback-able (the
+# previous revision keeps serving, traffic can be shifted back in seconds),
+# so this is lower-stakes than an infra apply that could touch a database.
+#
+# Only rebuilds/redeploys the specific service(s) whose source directory
+# actually changed — see the detect-changes job.
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'bap-application/**'
+      - 'bpp-application/**'
+      - 'bap-frontend/**'
+      - 'bpp-frontend/**'
+      - 'ion-service/**'
+      - 'cs-mock/**'
+      - 'onix-bap/**'
+      - 'onix-bpp/**'
+
+jobs:
+  detect-changes:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.set-matrix.outputs.matrix }}
+      has_changes: ${{ steps.set-matrix.outputs.has_changes }}
+    steps:
+      - uses: dorny/paths-filter@v3
+        id: filter
+        with:
+          filters: |
+            bap:
+              - 'bap-application/**'
+            bpp:
+              - 'bpp-application/**'
+            insurance_bap:
+              - 'bap-frontend/**'
+            insurance_bpp:
+              - 'bpp-frontend/**'
+            ion:
+              - 'ion-service/**'
+            cs_mock:
+              - 'cs-mock/**'
+            onix_bap:
+              - 'onix-bap/**'
+            onix_bpp:
+              - 'onix-bpp/**'
+
+      # bap-application/ and bpp-application/ each fan out to TWO matrix rows
+      # (the service image, Dockerfile, and the migrate-job image,
+      # Dockerfile.migrate — same source dir, different Dockerfile). Every
+      # other directory fans out to exactly one row.
+      - name: Build deploy matrix
+        id: set-matrix
+        run: |
+          entries=()
+          add() {
+            entries+=("$(jq -nc --arg name "$1" --arg kind "$2" --arg image "$3" \
+              --arg context "$4" --arg dockerfile "$5" \
+              '{name:$name,kind:$kind,image:$image,context:$context,dockerfile:$dockerfile}')")
+          }
+
+          if [ "${{ steps.filter.outputs.bap }}" = "true" ]; then
+            add bap         service bap-application         bap-application Dockerfile
+            add migrate-bap job     bap-application-migrate  bap-application Dockerfile.migrate
+          fi
+          if [ "${{ steps.filter.outputs.bpp }}" = "true" ]; then
+            add bpp         service bpp-application         bpp-application Dockerfile
+            add migrate-bpp job     bpp-application-migrate  bpp-application Dockerfile.migrate
+          fi
+          if [ "${{ steps.filter.outputs.insurance_bap }}" = "true" ]; then
+            add insurance-bap service bap-frontend bap-frontend Dockerfile
+          fi
+          if [ "${{ steps.filter.outputs.insurance_bpp }}" = "true" ]; then
+            add insurance-bpp service bpp-frontend bpp-frontend Dockerfile
+          fi
+          if [ "${{ steps.filter.outputs.ion }}" = "true" ]; then
+            add ion service ion-service ion-service Dockerfile
+          fi
+          if [ "${{ steps.filter.outputs.cs_mock }}" = "true" ]; then
+            add cs-mock service cs-mock cs-mock Dockerfile
+          fi
+          if [ "${{ steps.filter.outputs.onix_bap }}" = "true" ]; then
+            add onix-bap service onix-bap onix-bap Dockerfile
+          fi
+          if [ "${{ steps.filter.outputs.onix_bpp }}" = "true" ]; then
+            add onix-bpp service onix-bpp onix-bpp Dockerfile
+          fi
+
+          if [ ${#entries[@]} -eq 0 ]; then
+            echo "matrix=[]" >> "$GITHUB_OUTPUT"
+            echo "has_changes=false" >> "$GITHUB_OUTPUT"
+          else
+            { printf '%s\n' "${entries[@]}" | jq -sc .; } | sed 's/^/matrix=/' >> "$GITHUB_OUTPUT"
+            echo "has_changes=true" >> "$GITHUB_OUTPUT"
+          fi
+
+  build-and-deploy:
+    needs: detect-changes
+    if: needs.detect-changes.outputs.has_changes == 'true'
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false # one unrelated service failing shouldn't cancel the others
+      matrix:
+        include: ${{ fromJson(needs.detect-changes.outputs.matrix) }}
+    permissions:
+      id-token: write
+      contents: read
+    env:
+      REGISTRY: asia-southeast2-docker.pkg.dev/${{ vars.GCP_PROJECT_ID }}/insurance-app
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: projects/393691661756/locations/global/workloadIdentityPools/github-pool/providers/github-provider
+          service_account: app-deploy@remiges-ion.iam.gserviceaccount.com
+
+      - uses: google-github-actions/setup-gcloud@v2
+
+      - run: gcloud auth configure-docker asia-southeast2-docker.pkg.dev --quiet
+
+      - name: Build and push image
+        run: |
+          docker build \
+            -t "${REGISTRY}/${{ matrix.image }}:${{ github.sha }}" \
+            -f "${{ matrix.context }}/${{ matrix.dockerfile }}" \
+            "${{ matrix.context }}"
+          docker push "${REGISTRY}/${{ matrix.image }}:${{ github.sha }}"
+
+      - name: Deploy Cloud Run service
+        if: matrix.kind == 'service'
+        run: |
+          gcloud run deploy "${{ matrix.name }}" \
+            --image="${REGISTRY}/${{ matrix.image }}:${{ github.sha }}" \
+            --region=asia-southeast2 \
+            --project="${{ vars.GCP_PROJECT_ID }}"
+
+      # Updates the job definition only — nothing in this workflow ever runs
+      # `gcloud run jobs execute`. Migrations stay a deliberate, manual,
+      # gated step (see terraform/README.md) since schema changes need
+      # explicit review of timing, not an automatic trigger on every push.
+      - name: Update Cloud Run job definition
+        if: matrix.kind == 'job'
+        run: |
+          gcloud run jobs update "${{ matrix.name }}" \
+            --image="${REGISTRY}/${{ matrix.image }}:${{ github.sha }}" \
+            --region=asia-southeast2 \
+            --project="${{ vars.GCP_PROJECT_ID }}"
