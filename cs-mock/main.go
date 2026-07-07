@@ -11,6 +11,7 @@ import (
 	"time"
 )
 
+// Mock Cataloging Service entrypoint.
 func main() {
 	port := os.Getenv("CS_PORT")
 	if port == "" {
