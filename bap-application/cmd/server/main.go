@@ -12,6 +12,7 @@ import (
 	"github.com/indonesiaopennetwork/ion-insurance-testapp/bap-application/internal/service"
 )
 
+// BAP server entrypoint (deploy pipeline fanout test).
 func main() {
 	ctx := context.Background()
 
