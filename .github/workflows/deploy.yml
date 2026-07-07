@@ -155,10 +155,11 @@ jobs:
         # terraform/cloud-run-jobs.tf), and unlike `gcloud run deploy` for
         # services (which defaults sensibly to the ingress container),
         # `gcloud run jobs update` refuses to guess which container's image
-        # to update on a multi-container job.
+        # to update on a multi-container job. --image MUST come after
+        # --container -- gcloud rejects the reverse order outright.
         run: |
           gcloud run jobs update "${{ matrix.name }}" \
-            --image="${REGISTRY}/${{ matrix.image }}:${{ github.sha }}" \
-            --container=migrate \
             --region=asia-southeast2 \
-            --project="${{ vars.GCP_PROJECT_ID }}"
+            --project="${{ vars.GCP_PROJECT_ID }}" \
+            --container=migrate \
+            --image="${REGISTRY}/${{ matrix.image }}:${{ github.sha }}"
