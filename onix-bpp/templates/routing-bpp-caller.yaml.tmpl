@@ -2,7 +2,7 @@ routingRules:
   - version: "2.0.0"
     targetType: "url"
     target:
-      url: "http://onix-bap:8081/bap/receiver"
+      url: "${ONIX_BAP_URL}/bap/receiver"
     endpoints:
       - on_discover
       - on_select
@@ -16,6 +16,6 @@ routingRules:
   - version: "2.0.0"
     targetType: "url"
     target:
-      url: "http://cs:9090/catalog"
+      url: "${CS_URL}/catalog"
     endpoints:
       - publish

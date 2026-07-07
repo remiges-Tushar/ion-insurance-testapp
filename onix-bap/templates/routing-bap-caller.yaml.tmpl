@@ -1,0 +1,15 @@
+routingRules:
+  - version: "2.0.0"
+    targetType: "url"
+    target:
+      url: "${ONIX_BPP_URL}/bpp/receiver"
+    endpoints:
+      - select
+      - init
+      - confirm
+      - status
+      - cancel
+      - rate
+      - support
+      - discover
+      - reconcile
