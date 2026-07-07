@@ -27,6 +27,12 @@ jobs:
       matrix: ${{ steps.set-matrix.outputs.matrix }}
       has_changes: ${{ steps.set-matrix.outputs.has_changes }}
     steps:
+      # paths-filter needs an actual git checkout to diff against — it
+      # doesn't work purely off the GitHub API for this. Learned this the
+      # hard way: the first real run failed with "fatal: not a git
+      # repository" without this step.
+      - uses: actions/checkout@v4
+
       - uses: dorny/paths-filter@v3
         id: filter
         with:
