@@ -150,8 +150,15 @@ jobs:
       # explicit review of timing, not an automatic trigger on every push.
       - name: Update Cloud Run job definition
         if: matrix.kind == 'job'
+        # --container is required here: migrate-bap/migrate-bpp each have two
+        # containers (the migrate container + the cloudsql-proxy sidecar, see
+        # terraform/cloud-run-jobs.tf), and unlike `gcloud run deploy` for
+        # services (which defaults sensibly to the ingress container),
+        # `gcloud run jobs update` refuses to guess which container's image
+        # to update on a multi-container job.
         run: |
           gcloud run jobs update "${{ matrix.name }}" \
             --image="${REGISTRY}/${{ matrix.image }}:${{ github.sha }}" \
+            --container=migrate \
             --region=asia-southeast2 \
             --project="${{ vars.GCP_PROJECT_ID }}"
