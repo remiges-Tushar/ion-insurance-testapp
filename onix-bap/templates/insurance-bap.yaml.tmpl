@@ -63,13 +63,11 @@ modules:
         schemaValidator:
           id: schemav2validator
           config:
-            type: url
-            location: https://raw.githubusercontent.com/indonesiaopennetwork/ion-specs/refs/heads/feat/beckn-v2-merge/schema/dist/ion-full.yaml
-            cacheTTL: "3600"
+            type: file
+            location: /app/schemas/ion-full.yaml
             extendedSchema_enabled: "true"
             extendedSchema_cacheTTL: "86400"
             extendedSchema_maxCacheSize: "100"
-            extendedSchema_downloadTimeout: "30"
         cache:
           id: cache
           config:
@@ -120,13 +118,11 @@ modules:
         schemaValidator:
           id: schemav2validator
           config:
-            type: url
-            location: https://raw.githubusercontent.com/indonesiaopennetwork/ion-specs/refs/heads/feat/beckn-v2-merge/schema/dist/ion-full.yaml
-            cacheTTL: "3600"
+            type: file
+            location: /app/schemas/ion-full.yaml
             extendedSchema_enabled: "true"
             extendedSchema_cacheTTL: "86400"
             extendedSchema_maxCacheSize: "100"
-            extendedSchema_downloadTimeout: "30"
         cache:
           id: cache
           config:
